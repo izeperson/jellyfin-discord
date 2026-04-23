@@ -4,5 +4,6 @@
   "tmdb_api_key": "0c3bd759cd74644de59af7ca606f90fc",
   "discord_app_id": "",
   "target_user": "admin",
-  "poll_interval": 5
+  "poll_interval": 3,
+  "show_paused": false
 }
