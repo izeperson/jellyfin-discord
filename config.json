@@ -1,0 +1,8 @@
+{
+  "jellyfin_url": "http://10.0.0.4:8096",
+  "jellyfin_token": "827ecafa92b44235bcabd7707d304a87",
+  "tmdb_api_key": "0c3bd759cd74644de59af7ca606f90fc",
+  "discord_app_id": "",
+  "target_user": "admin",
+  "poll_interval": 5
+}
