@@ -55,7 +55,7 @@ func getTMDBPoster(apiKey string, query string) string {
 	json.NewDecoder(resp.Body).Decode(&res)
 	if len(res.Results) > 0 && res.Results[0].PosterPath != "" {
 		rawUrl := "https://image.tmdb.org/t/p/w500" + res.Results[0].PosterPath
-		return fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512&h=512&fit=cover&a=t", url.QueryEscape(rawUrl))
+		return fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512&h=512&fit=cover&a=c", url.QueryEscape(rawUrl))
 	}
 	return ""
 }
@@ -81,6 +81,7 @@ func main() {
 
 	var lastItemID string
 	var lastPlayState bool
+	var lastPosTicks float64
 
 	for {
 		req, _ := http.NewRequest("GET", cfg.JellyfinURL+"/Sessions", nil)
@@ -98,13 +99,14 @@ func main() {
 
 		lineOne, lineTwo, searchTitle, currentID := "", "", "", ""
 		var startUnix, endUnix int64
+		var posTicks float64
 		isPaused := false
 
 		for _, s := range sessions {
 			if name, ok := s["UserName"].(string); ok && name == cfg.TargetUser {
 				if playState, ok := s["PlayState"].(map[string]interface{}); ok {
 					isPaused, _ = playState["IsPaused"].(bool)
-					posTicks, _ := playState["PositionTicks"].(float64)
+					posTicks, _ = playState["PositionTicks"].(float64)
 
 					if item, ok := s["NowPlayingItem"].(map[string]interface{}); ok {
 						currentID, _ = item["Id"].(string)
@@ -135,6 +137,9 @@ func main() {
 			}
 		}
 
+		diff := posTicks - lastPosTicks
+		skipped := (diff > 50000000 || diff < -50000000) && currentID == lastItemID && lastPosTicks != 0
+
 		if currentID != "" {
 			if isPaused && !cfg.ShowPaused {
 				if lastPlayState != isPaused {
@@ -142,7 +147,7 @@ func main() {
 					logInfo("Playback paused (Status hidden):", lineOne)
 					lastPlayState = isPaused
 				}
-			} else if currentID != lastItemID || isPaused != lastPlayState {
+			} else if currentID != lastItemID || isPaused != lastPlayState || skipped {
 				poster := getTMDBPoster(cfg.TMDBAPIKey, searchTitle)
 				activity := discordrichpresence.Activity{
 					Assets: discordrichpresence.Assets{LargeImage: poster},
@@ -163,17 +168,20 @@ func main() {
 						Start: startUnix * 1000,
 						End:   endUnix * 1000,
 					}
-					logInfo("Status updated (Playing):", fmt.Sprintf("%s - %s", lineOne, lineTwo))
+					logInfo("Status updated (Playing/Skipped):", fmt.Sprintf("%s - %s", lineOne, lineTwo))
 				}
 
 				drpc.SetActivity(activity)
-				lastItemID, lastPlayState = currentID, isPaused
+				lastItemID, lastPlayState, lastPosTicks = currentID, isPaused, posTicks
 			}
 		} else if currentID == "" && lastItemID != "" {
 			drpc.ClearActivity()
 			logInfo("Playback stopped", "")
 			lastItemID = ""
+			lastPosTicks = 0
 		}
+
+		lastPosTicks = posTicks
 		time.Sleep(time.Duration(cfg.PollInterval) * time.Second)
 	}
 }
