@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/jacksonthemaster/discordrichpresence"
@@ -23,6 +24,7 @@ type Config struct {
 	JellyfinURL   string `json:"jellyfin_url"`
 	JellyfinToken string `json:"jellyfin_token"`
 	TMDBAPIKey    string `json:"tmdb_api_key"`
+	OMDBAPIKey    string `json:"omdb_api_key"`
 	DiscordAppID  string `json:"discord_app_id"`
 	PollInterval  int    `json:"poll_interval"`
 	TargetUser    string `json:"target_user"`
@@ -56,6 +58,47 @@ func getTMDBPoster(apiKey string, query string) string {
 	if len(res.Results) > 0 && res.Results[0].PosterPath != "" {
 		rawUrl := "https://image.tmdb.org/t/p/w500" + res.Results[0].PosterPath
 		return fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512&h=512&fit=cover&a=c", url.QueryEscape(rawUrl))
+	}
+	return ""
+}
+
+func getRatings(apiKey string, query string, year string) string {
+	if apiKey == "" {
+		return ""
+	}
+	apiURL := fmt.Sprintf("http://www.omdbapi.com/?apikey=%s&t=%s", apiKey, url.QueryEscape(query))
+	if year != "" && year != "0" {
+		apiURL += fmt.Sprintf("&y=%s", year)
+	}
+
+	resp, err := http.Get(apiURL)
+	if err != nil || resp.StatusCode != 200 {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	var res struct {
+		Ratings []struct {
+			Source string `json:"Source"`
+			Value  string `json:"Value"`
+		} `json:"Ratings"`
+	}
+	json.NewDecoder(resp.Body).Decode(&res)
+
+	var imdb, rt string
+	for _, r := range res.Ratings {
+		switch r.Source {
+		case "Internet Movie Database":
+			imdb = "⭐ " + r.Value
+		case "Rotten Tomatoes":
+			rt = "🍅 " + r.Value
+		}
+	}
+
+	if imdb != "" && rt != "" {
+		return fmt.Sprintf("%s  %s", imdb, rt)
+	} else if imdb != "" || rt != "" {
+		return imdb + rt
 	}
 	return ""
 }
@@ -97,7 +140,7 @@ func main() {
 		json.NewDecoder(resp.Body).Decode(&sessions)
 		resp.Body.Close()
 
-		lineOne, lineTwo, searchTitle, currentID := "", "", "", ""
+		lineOne, lineTwo, searchTitle, currentID, prodYear := "", "", "", "", ""
 		var startUnix, endUnix int64
 		var posTicks float64
 		isPaused := false
@@ -111,6 +154,11 @@ func main() {
 					if item, ok := s["NowPlayingItem"].(map[string]interface{}); ok {
 						currentID, _ = item["Id"].(string)
 						runTicks, _ := item["RunTimeTicks"].(float64)
+
+						// Get Production Year
+						if py, ok := item["ProductionYear"].(float64); ok {
+							prodYear = strconv.Itoa(int(py))
+						}
 
 						if runTicks > 0 && !isPaused {
 							startUnix = time.Now().Unix() - int64(posTicks/10000000)
@@ -149,6 +197,8 @@ func main() {
 				}
 			} else if currentID != lastItemID || isPaused != lastPlayState || skipped {
 				poster := getTMDBPoster(cfg.TMDBAPIKey, searchTitle)
+				ratings := getRatings(cfg.OMDBAPIKey, searchTitle, prodYear)
+
 				activity := discordrichpresence.Activity{
 					Assets: discordrichpresence.Assets{LargeImage: poster},
 					Type:   3,
@@ -156,13 +206,21 @@ func main() {
 
 				if isPaused {
 					activity.Details = lineOne
-					activity.State = "Paused"
+					if ratings != "" {
+						activity.State = "Paused | " + ratings
+					} else {
+						activity.State = "Paused"
+					}
 					activity.Assets.LargeText = lineOne
 					activity.Assets.SmallImage = "https://images.weserv.nl/?url=" + url.QueryEscape(PauseIconURL) + "&w=64&h=64&inv"
 					logInfo("Status updated (Paused):", lineOne)
 				} else {
 					activity.Details = lineOne
-					activity.State = lineTwo
+					if ratings != "" {
+						activity.State = fmt.Sprintf("%s | %s", lineTwo, ratings)
+					} else {
+						activity.State = lineTwo
+					}
 					activity.Assets.LargeText = lineOne
 					activity.Timestamps = discordrichpresence.Timestamps{
 						Start: startUnix * 1000,
