@@ -25,10 +25,10 @@ type Config struct {
 	JellyfinToken string `json:"jellyfin_token"`
 	TMDBAPIKey    string `json:"tmdb_api_key"`
 	OMDBAPIKey    string `json:"omdb_api_key"`
-	DiscordAppID  string `json:"discord_app_id"`
+	DiscordAppID  int `json:"discord_app_id"`
 	PollInterval  int    `json:"poll_interval"`
-	TargetUser    string `json:"target_user"`
-	ShowPaused    bool   `json:"show_paused"`
+	TargetUser    string `json:"target_user"` // set this to the user you want to monitor for jellyfin activity.
+	ShowPaused    bool   `json:"show_paused"` // if this is false, it will temporarily kill the IPC connection to discord. if true, it will show when you have a show paused with a CSS overlay of a pause button.
 }
 
 func logInfo(msg string, detail string) {
@@ -140,7 +140,7 @@ func main() {
 		json.NewDecoder(resp.Body).Decode(&sessions)
 		resp.Body.Close()
 
-		lineOne, lineTwo, searchTitle, currentID, prodYear := "", "", "", "", ""
+		lineOne, lineTwo, searchTitle, currentID, prodYear := "", "", "", "", "" // set empty so that it can be filled by info taken from jellyfin.
 		var startUnix, endUnix int64
 		var posTicks float64
 		isPaused := false
@@ -155,7 +155,7 @@ func main() {
 						currentID, _ = item["Id"].(string)
 						runTicks, _ := item["RunTimeTicks"].(float64)
 
-						// Get Production Year
+						// Get Media Production Year
 						if py, ok := item["ProductionYear"].(float64); ok {
 							prodYear = strconv.Itoa(int(py))
 						}
@@ -192,7 +192,7 @@ func main() {
 			if isPaused && !cfg.ShowPaused {
 				if lastPlayState != isPaused {
 					drpc.ClearActivity()
-					logInfo("Playback paused (Status hidden):", lineOne)
+					logInfo("Playback paused (Status hidden):", lineOne) // this happens if you set "show_paused" in the config.json to false.
 					lastPlayState = isPaused
 				}
 			} else if currentID != lastItemID || isPaused != lastPlayState || skipped {
@@ -207,12 +207,12 @@ func main() {
 				if isPaused {
 					activity.Details = lineOne
 					if ratings != "" {
-						activity.State = "Paused | " + ratings
+						activity.State = "Paused | " + ratings // this will show if you have it set to true.
 					} else {
 						activity.State = "Paused"
 					}
 					activity.Assets.LargeText = lineOne
-					activity.Assets.SmallImage = "https://images.weserv.nl/?url=" + url.QueryEscape(PauseIconURL) + "&w=64&h=64&inv"
+					activity.Assets.SmallImage = "https://images.weserv.nl/?url=" + url.QueryEscape(PauseIconURL) + "&w=64&h=64&inv" // display paused icon as mentioned on line 31.
 					logInfo("Status updated (Paused):", lineOne)
 				} else {
 					activity.Details = lineOne
@@ -232,7 +232,7 @@ func main() {
 				drpc.SetActivity(activity)
 				lastItemID, lastPlayState, lastPosTicks = currentID, isPaused, posTicks
 			}
-		} else if currentID == "" && lastItemID != "" {
+		} else if currentID == "" && lastItemID != "" { // checking to see if user has paused their content.
 			drpc.ClearActivity()
 			logInfo("Playback stopped", "")
 			lastItemID = ""
