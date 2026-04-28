@@ -5,3 +5,9 @@ Example:
 <br>
 <h3>Configuration</h3>
 use the config.json file to configure values for this program.
+<p>An example configuration file could be:
+<img width="531" height="288" alt="image" src="https://github.com/user-attachments/assets/2b12a876-c14b-4263-9061-380f45c3bcd4" />
+</p>
+
+<h4>The available values for config.json are:</h4>
+<p></p>
