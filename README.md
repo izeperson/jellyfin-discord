@@ -10,4 +10,4 @@ use the config.json file to configure values for this program.
 </p>
 
 <h4>The available values for config.json are:</h4>
-<p></p>
+<p>jellyfin-url, jellyfin-token, tmdb_api_key, omdb_api_key, discord_app_api, target_user, poll_interval, show_paused</p>
