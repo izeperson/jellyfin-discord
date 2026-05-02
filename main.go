@@ -114,7 +114,7 @@ func main() {
 	file.Close()
 
 	logInfo("Connecting to Discord...", "")
-	drpc := discordrichpresence.NewClient(cfg.DiscordAppID)
+	drpc := discordrichpresence.NewClient(strconv.Itoa(cfg.DiscordAppID))
 	err = drpc.Connect()
 	if err != nil {
 		logError("Discord failed", err.Error())
