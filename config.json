@@ -6,5 +6,7 @@
   "discord_app_id": "1496694131328811060",
   "target_user": "admin",
   "poll_interval": 3,
-  "show_paused": false
+  "show_paused": false,
+  "episode_thumbnails": false,
+  "fallback_artwork": false
 }
