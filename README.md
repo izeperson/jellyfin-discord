@@ -24,3 +24,4 @@ use the config.json file to configure values for this program.
   <li><b>Music support</b>: Music tracks (type "Audio") are now supported. Discord will show the track name, artist, and album.</li>
   <li><b>Config reload</b>: Send a SIGHUP signal to reload config.json at runtime without restarting. Use: <code>kill -HUP &lt;pid&gt;</code></li>
 </ul>
+<h1>This program is unstable; expect bugs.</h1>
