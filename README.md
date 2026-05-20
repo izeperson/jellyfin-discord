@@ -1,18 +1,16 @@
 # jellyfin-discord
 <h3>Display what you're watching on Jellyfin on Discord.</h3>
-<p>Example:
-  <br>
-  <img width="363" height="151" alt="image" src="https://github.com/user-attachments/assets/8bd15a56-ad94-4f41-8634-f174446d8796" />
-</p>
+Example:
+<img width="363" height="151" alt="image" src="https://github.com/user-attachments/assets/8bd15a56-ad94-4f41-8634-f174446d8796" />
+<br>
 <h3>Configuration</h3>
 use the config.json file to configure values for this program.
 <p>An example configuration file could be:
-  <br>
-  <img width="531" height="288" alt="image" src="https://github.com/user-attachments/assets/2b12a876-c14b-4263-9061-380f45c3bcd4" />
+<img width="531" height="288" alt="image" src="https://github.com/user-attachments/assets/2b12a876-c14b-4263-9061-380f45c3bcd4" />
 </p>
 
 <h4>The available values for config.json are:</h4>
-<p>jellyfin_url, jellyfin_token, tmdb_api_key, omdb_api_key, discord_app_id, target_user, poll_interval, show_paused, episode_thumbnails, fallback_artwork</p>
+<p>jellyfin_url, jellyfin_token, tmdb_api_key, omdb_api_key, discord_app_id, target_user, poll_interval, show_paused, episode_thumbnails, fallback_artwork, generic_item_text</p>
 
 <ul>
   <li><b>episode_thumbnails</b> (bool): fetch episode-specific stills from TMDB instead of the series poster</li>
@@ -26,4 +24,3 @@ use the config.json file to configure values for this program.
   <li><b>Music support</b>: Music tracks (type "Audio") are now supported. Discord will show the track name, artist, and album.</li>
   <li><b>Config reload</b>: Send a SIGHUP signal to reload config.json at runtime without restarting. Use: <code>kill -HUP &lt;pid&gt;</code></li>
 </ul>
-<h1>This program is unstable; expect bugs.</h1>
