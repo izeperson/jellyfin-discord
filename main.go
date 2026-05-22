@@ -159,7 +159,7 @@ func (d *DiscordRPC) Connect() error {
 	return fmt.Errorf("no active socket found: %w", err)
 }
 
-func (d *DiscordRPC) SetActivity(a Activity) error {
+func (d *DiscordRPC) SetActivity(a *Activity) error {
 	payload := map[string]interface{}{
 		"cmd": "SET_ACTIVITY",
 		"args": map[string]interface{}{
@@ -172,7 +172,7 @@ func (d *DiscordRPC) SetActivity(a Activity) error {
 }
 
 func (d *DiscordRPC) ClearActivity() error {
-	return d.SetActivity(Activity{})
+	return d.SetActivity(nil)
 }
 
 func (d *DiscordRPC) Close() {
@@ -217,7 +217,7 @@ func searchTMDB(apiKey string, query string) (posterURL string, tmdbID int) {
 	}
 	if len(res.Results) > 0 && res.Results[0].PosterPath != "" {
 		rawUrl := "https://image.tmdb.org/t/p/w500" + res.Results[0].PosterPath
-		posterURL = fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512&h=512&fit=cover&a=c", url.QueryEscape(rawUrl))
+		posterURL = fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512", url.QueryEscape(rawUrl))
 		tmdbID = res.Results[0].ID
 	}
 	return
@@ -244,7 +244,7 @@ func getTMDBEpisodeStill(apiKey string, tmdbID int, seasonNum, epNum float64) st
 	}
 	if len(res.Stills) > 0 && res.Stills[0].FilePath != "" {
 		rawUrl := "https://image.tmdb.org/t/p/w500" + res.Stills[0].FilePath
-		return fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512&h=512&fit=cover&a=c", url.QueryEscape(rawUrl))
+		return fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512", url.QueryEscape(rawUrl))
 	}
 	return ""
 }
@@ -385,6 +385,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 	var posTicks, runTimeTicks float64
 	isPaused := false
 	var sNum, eNum float64
+	var isAudio bool
 
 	for _, item := range sessions {
 		if item.UserName == cfg.TargetUser {
@@ -392,6 +393,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 			posTicks = item.PlayState.PositionTicks
 			currentID = item.NowPlayingItem.Id
 			runTimeTicks = item.NowPlayingItem.RunTimeTicks
+			isAudio = item.NowPlayingItem.Type == "Audio"
 			lineOne, lineTwo, searchTitle, prodYear, sNum, eNum = getMediaDetails(item, cfg.GenericItemText)
 			break
 		}
@@ -408,27 +410,29 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 	if currentID != "" {
 		if isPaused && !cfg.ShowPaused {
 			if *lastPlayState != isPaused {
-				drpc.ClearActivity()
-
-				*lastItemID = ""
-				*lastPosTicks = 0
-				*lastPlayState = isPaused
-
-				logInfo("Playback paused (Status hidden):", lineOne)
-			}
-		} else if currentID != *lastItemID || isPaused != *lastPlayState || skipped {
-			if cfg.TMDBAPIKey == "" {
-				logWarn("Image issue", "TMDB API Key is missing in config.json. Images will fail to load.")
-			}
-
-			poster, tmdbID := searchTMDB(cfg.TMDBAPIKey, searchTitle)
-			if poster == "" && cfg.FallbackArtwork && currentID != "" {
-				poster = getJellyfinArtwork(cfg.JellyfinURL, cfg.JellyfinToken, currentID)
-				if poster != "" && (strings.Contains(poster, "10.") || strings.Contains(poster, "192.168.") || strings.Contains(poster, "127.0.0.1") || strings.Contains(poster, "localhost")) {
-					logWarn("Jellyfin artwork URL is a local IP. Image might not show in Discord without a public URL.", currentID)
+				if err := drpc.ClearActivity(); err == nil {
+					*lastItemID = ""
+					*lastPosTicks = 0
+					*lastPlayState = isPaused
+					logInfo("Playback paused (Status hidden):", lineOne)
+				} else {
+					logWarn("Failed to clear Discord activity (paused/hidden):", err.Error())
 				}
 			}
-			if cfg.EpisodeThumbnails && sNum > 0 && eNum > 0 {
+		} else if currentID != *lastItemID || isPaused != *lastPlayState || skipped {
+			var poster string
+			var tmdbID int
+
+			if isAudio {
+				poster = getJellyfinArtwork(cfg.JellyfinURL, cfg.JellyfinToken, currentID)
+			} else {
+				if cfg.TMDBAPIKey == "" {
+					logWarn("Image issue", "TMDB API Key is missing in config.json. Images will fail to load.")
+				}
+				poster, tmdbID = searchTMDB(cfg.TMDBAPIKey, searchTitle)
+			}
+
+			if !isAudio && cfg.EpisodeThumbnails && sNum > 0 && eNum > 0 {
 				if still := getTMDBEpisodeStill(cfg.TMDBAPIKey, tmdbID, sNum, eNum); still != "" {
 					poster = still
 				} else {
@@ -441,6 +445,10 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 			activity := Activity{
 				Assets: Assets{LargeImage: poster},
 				Type:   3,
+			}
+
+			if isAudio {
+				activity.Type = 2
 			}
 
 			if isPaused {
@@ -470,16 +478,21 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				logInfo("Status updated (Playing/Skipped):", fmt.Sprintf("%s - %s", lineOne, lineTwo))
 			}
 
-			drpc.SetActivity(activity)
-			*lastItemID, *lastPlayState, *lastPosTicks = currentID, isPaused, posTicks
+			if err := drpc.SetActivity(&activity); err == nil {
+				*lastItemID, *lastPlayState, *lastPosTicks = currentID, isPaused, posTicks
+			} else {
+				logWarn("Failed to update Discord activity:", err.Error())
+			}
 		}
 	} else if currentID == "" && *lastItemID != "" {
-		drpc.ClearActivity()
-		logInfo("Playback stopped", "")
-		*lastItemID = ""
-		*lastPosTicks = 0
+		if err := drpc.ClearActivity(); err == nil {
+			logInfo("Playback stopped", "")
+			*lastItemID = ""
+			*lastPosTicks = 0
+		} else {
+			logWarn("Failed to clear Discord activity (stopped):", err.Error())
+		}
 	} else if currentID == "" && *lastItemID == "" {
-
 		*lastPosTicks = 0
 	}
 }
