@@ -1,5 +1,5 @@
 {
-  "jellyfin_url": "http://10.0.0.4:8096",
+  "jellyfin_url": "http://10.0.0.3:8096",
   "jellyfin_token": "",
   "tmdb_api_key": "",
   "omdb_api_key": "",
@@ -8,5 +8,7 @@
   "poll_interval": 3,
   "show_paused": false,
   "episode_thumbnails": false,
-  "fallback_artwork": false
+  "fallback_artwork": false,
+  "anilist_enabled": true,
+  "anime_tags": ["anime", "japanese animation", "animation", "manga", "otaku"]
 }
