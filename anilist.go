@@ -15,6 +15,7 @@ func searchAniList(query string) (posterURL string, score string) {
 	}
 	anilistSearchCache.RUnlock()
 
+	logInfo("AniList Search", fmt.Sprintf("Searching for query: %s", query))
 	jsonData := map[string]interface{}{
 		"query": `
 			query ($search: String) {
@@ -27,12 +28,14 @@ func searchAniList(query string) (posterURL string, score string) {
 	}
 
 	body, _ := json.Marshal(jsonData)
+	logInfo("AniList Search", fmt.Sprintf("AniList GraphQL request for query: %s", query))
 	req, err := http.NewRequest("POST", "https://graphql.anilist.co", bytes.NewBuffer(body))
 	if err != nil {
 		return "", ""
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	// No specific log for request URL as it's always "https://graphql.anilist.co"
 	resp, err := httpClient.Do(req)
 	if err != nil || resp.StatusCode != 200 {
 		return "", ""
@@ -51,19 +54,23 @@ func searchAniList(query string) (posterURL string, score string) {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		logWarn("AniList Search", fmt.Sprintf("AniList JSON decode error: %v", err))
 		return "", ""
 	}
 
 	posterURL = res.Data.Media.CoverImage.Large
 	if res.Data.Media.AverageScore > 0 {
 		score = fmt.Sprintf("❤️ %d%%", res.Data.Media.AverageScore)
+	}
+	if posterURL != "" {
+		logInfo("AniList Search", fmt.Sprintf("AniList found artwork: %s (Score: %s)", posterURL, score))
 		anilistSearchCache.Lock()
 		anilistSearchCache.m[query] = struct {
 			PosterURL string
 			Score     string
 		}{PosterURL: posterURL, Score: score}
 		anilistSearchCache.Unlock()
-		return posterURL, score
 	}
+	logInfo("AniList Search", fmt.Sprintf("AniList search found no artwork for query: %s", query))
 	return
 }

@@ -13,9 +13,12 @@ type JellyfinSession struct {
 		Type              string   `json:"Type"`
 		Name              string   `json:"Name"`
 		SeriesName        string   `json:"SeriesName"`
+		ParentId          string   `json:"ParentId"`
+		SeriesId          string   `json:"SeriesId"`
 		ParentIndexNumber float64  `json:"ParentIndexNumber"`
 		IndexNumber       float64  `json:"IndexNumber"`
 		Artists           []string `json:"Artists"`
+		AlbumId           string   `json:"AlbumId"`
 		Album             string   `json:"Album"`
 		Tags              []string `json:"Tags"` // Added to support anime detection
 	} `json:"NowPlayingItem"`

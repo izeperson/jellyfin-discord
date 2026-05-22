@@ -18,8 +18,12 @@ const (
 	ColorYellow          = "\033[33m"
 	ColorRed             = "\033[31m"
 	PauseIconURL         = "https://raw.githubusercontent.com/google/material-design-icons/master/png/av/pause/materialicons/48dp/2x/baseline_pause_black_48dp.png"
+	PlaceholderImageURL  = "https://raw.githubusercontent.com/jellyfin/jellyfin/master/assets/icon-transparent.png"
 	TicksPerSecond       = 10000000
 	SeekThresholdSeconds = 5
+	ClientName           = "Jellyfin-Discord-RPC"
+	ClientVersion        = "1.1.0"
+	DeviceName           = "Go-Backend"
 )
 
 var httpClient = &http.Client{
@@ -114,30 +118,109 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 			// Determine if the item is anime based on Jellyfin tags
 			isAnime := isItemAnime(*targetItem, cfg)
 
-			if isAudio { // Audio items get artwork directly from Jellyfin
-				poster = getJellyfinArtwork(cfg.JellyfinURL, cfg.JellyfinToken, currentID)
-			} else { // Video items
-				// Prioritize AniList if enabled and item is detected as anime
-				if cfg.AnilistEnabled && isAnime {
-					poster, _ = searchAniList(searchTitle)
+			// Prioritize external APIs first, then fallback to Jellyfin artwork.
+			// This aligns with the user's request to use free external APIs and
+			// only use Jellyfin as a fallback.
+
+			if isAudio {
+				artistName := ""
+				if len(targetItem.NowPlayingItem.Artists) > 0 {
+					artistName = targetItem.NowPlayingItem.Artists[0]
 				}
 
-				// Fallback to TMDB if AniList is not enabled/didn't find anything, or if not anime
-				if poster == "" || !cfg.AnilistEnabled || !isAnime {
-					if cfg.TMDBAPIKey == "" {
-						logWarn("Image issue", "TMDB API Key is missing in config.json. Images will fail to load.")
+				// 1. Try iTunes (most common for popular music)
+				if artistName != "" && targetItem.NowPlayingItem.Album != "" {
+					poster = searchiTunes(artistName+" "+targetItem.NowPlayingItem.Album, artistName)
+				}
+				if poster == "" {
+					poster = searchiTunes(searchTitle, artistName) // Artist - Track
+				}
+				if poster == "" && targetItem.NowPlayingItem.Album != "" {
+					poster = searchiTunes(targetItem.NowPlayingItem.Album, artistName)
+				}
+				if poster == "" && lineOne != "" {
+					poster = searchiTunes(lineOne, artistName) // Track name
+				}
+
+				// 2. If iTunes fails, try MusicBrainz/Cover Art Archive
+				if poster == "" {
+					logInfo("Image Fetch", "iTunes search failed, attempting MusicBrainz/Cover Art Archive.")
+					if artistName != "" && targetItem.NowPlayingItem.Album != "" {
+						poster = searchMusicBrainz(artistName+" "+targetItem.NowPlayingItem.Album, artistName)
 					}
-					poster, tmdbID = searchTMDB(cfg.TMDBAPIKey, searchTitle)
+					if poster == "" {
+						poster = searchMusicBrainz(searchTitle, artistName) // Artist - Track
+					}
+					if poster == "" && targetItem.NowPlayingItem.Album != "" {
+						poster = searchMusicBrainz(targetItem.NowPlayingItem.Album, artistName)
+					}
+					if poster == "" && lineOne != "" {
+						poster = searchMusicBrainz(lineOne, artistName) // Track name
+					}
+				}
+			} else { // Video items
+				// 1. Prioritize AniList if enabled and item is detected as anime
+				if cfg.AnilistEnabled && isAnime {
+					logInfo("Image Fetch", fmt.Sprintf("Attempting AniList search for anime: %s", searchTitle))
+					poster, _ = searchAniList(searchTitle)
+					if poster != "" {
+						logInfo("Image Fetch", fmt.Sprintf("AniList search successful, poster found: %s", poster))
+					}
+				}
+
+				// 2. Fallback to TMDB if AniList is not enabled/didn't find anything, or if not anime
+				if poster == "" {
+					if cfg.TMDBAPIKey != "" {
+						logInfo("Image Fetch", fmt.Sprintf("Attempting TMDB search for: %s", searchTitle))
+						poster, tmdbID = searchTMDB(cfg.TMDBAPIKey, searchTitle, prodYear, targetItem.NowPlayingItem.Type)
+						if poster != "" {
+							logInfo("Image Fetch", fmt.Sprintf("TMDB search successful, poster found: %s", poster))
+						}
+					} else {
+						logWarn("Image Fetch", "TMDB API Key is missing in config.json. TMDB images will not be fetched.")
+					}
+				}
+
+				// 3. TMDB Episode Still fallback (only if a TMDB ID was found for the series)
+				if poster == "" && !isAudio && cfg.EpisodeThumbnails && sNum > 0 && eNum > 0 && tmdbID != 0 {
+					logInfo("Image Fetch", fmt.Sprintf("Attempting TMDB episode still search for: %s S%.0fE%.0f", searchTitle, sNum, eNum))
+					if still := getTMDBEpisodeStill(cfg.TMDBAPIKey, tmdbID, sNum, eNum); still != "" { // Only try if tmdbID is valid
+						poster = still
+						logInfo("Image Fetch", fmt.Sprintf("TMDB episode still found: %s", poster))
+					}
 				}
 			}
-			if !isAudio && cfg.EpisodeThumbnails && sNum > 0 && eNum > 0 && tmdbID != 0 {
-				if still := getTMDBEpisodeStill(cfg.TMDBAPIKey, tmdbID, sNum, eNum); still != "" { // Only try if tmdbID is valid
-					poster = still
+
+			// Final Fallback: Jellyfin internal artwork if all external providers fail
+			if poster == "" {
+				logInfo("Image Fetch", "External image providers failed, falling back to Jellyfin artwork.")
+				imageID := currentID
+				if isAudio {
+					if targetItem.NowPlayingItem.AlbumId != "" {
+						imageID = targetItem.NowPlayingItem.AlbumId
+					} else if targetItem.NowPlayingItem.ParentId != "" { // Try ParentId (often album folder)
+						imageID = targetItem.NowPlayingItem.ParentId
+					}
+				} else if targetItem.NowPlayingItem.Type == "Episode" && targetItem.NowPlayingItem.SeriesId != "" {
+					if !cfg.EpisodeThumbnails { // If episode thumbnails are NOT enabled, use series poster
+						imageID = targetItem.NowPlayingItem.SeriesId
+					}
+				}
+				jellyfinFallbackURL := getJellyfinArtwork(cfg.JellyfinURL, cfg.JellyfinToken, imageID)
+				if isValidImageURL(jellyfinFallbackURL) {
+					poster = jellyfinFallbackURL
+					logInfo("Image Fetch", fmt.Sprintf("Jellyfin artwork fallback successful, poster found: %s", poster))
 				} else {
-					logInfo("No TMDB episode still found for", fmt.Sprintf("%s S%.0fE%.0f", searchTitle, sNum, eNum))
+					logWarn("Image Fetch", fmt.Sprintf("Jellyfin artwork fallback URL (%s) is not valid or accessible.", jellyfinFallbackURL))
 				}
 
 			}
+
+			if poster == "" {
+				logWarn("Image Fetch", fmt.Sprintf("No image found for item after all attempts: %s. Using placeholder.", lineOne))
+				poster = PlaceholderImageURL
+			}
+
 			ratings := getRatings(cfg.OMDBAPIKey, searchTitle, prodYear)
 
 			activity := Activity{
@@ -156,7 +239,6 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				} else {
 					activity.State = "Paused"
 				}
-				activity.Assets.LargeText = lineOne
 				activity.Assets.SmallImage = "https://images.weserv.nl/?url=" + url.QueryEscape(PauseIconURL) + "&w=64&h=64&inv"
 				logInfo("Status updated (Paused):", lineOne)
 			} else {
@@ -166,7 +248,6 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				} else {
 					activity.State = lineTwo
 				}
-				activity.Assets.LargeText = lineOne
 				if startUnix > 0 && endUnix > 0 {
 					activity.Timestamps = Timestamps{
 						Start: startUnix,
@@ -272,7 +353,13 @@ func main() {
 			time.Sleep(time.Duration(cfg.PollInterval) * time.Second)
 			continue
 		}
-		req.Header.Add("X-Emby-Token", cfg.JellyfinToken)
+
+		authHeader := fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+			ClientName, DeviceName, cfg.DiscordAppID, ClientVersion, cfg.JellyfinToken)
+		req.Header.Set("Authorization", authHeader)
+		req.Header.Set("User-Agent", ClientName+"/"+ClientVersion)
+		req.Header.Set("Accept", "application/json")
+
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			logWarn("Jellyfin lost, retrying...", err.Error())
