@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,55 +19,79 @@ const (
 	ColorYellow          = "\033[33m"
 	ColorRed             = "\033[31m"
 	PauseIconURL         = "https://raw.githubusercontent.com/google/material-design-icons/master/png/av/pause/materialicons/48dp/2x/baseline_pause_black_48dp.png"
-	PlaceholderImageURL  = "https://raw.githubusercontent.com/jellyfin/jellyfin/master/assets/icon-transparent.png"
+	PlaceholderImageURL  = ""
 	TicksPerSecond       = 10000000
 	SeekThresholdSeconds = 5
 	ClientName           = "Jellyfin-Discord-RPC"
 	ClientVersion        = "1.1.0"
 	DeviceName           = "Go-Backend"
+	CacheTTL             = 24 * time.Hour
 )
 
 var httpClient = &http.Client{
-	Timeout: 10 * time.Second,
+	Timeout: 3 * time.Second,
 }
 
-// Cache for TMDB search results (posterURL, tmdbID)
 var tmdbSearchCache = struct {
 	sync.RWMutex
 	m map[string]struct {
 		PosterURL string
 		TMDBID    int
+		Timestamp time.Time
 	}
 }{m: make(map[string]struct {
 	PosterURL string
 	TMDBID    int
+	Timestamp time.Time
 })}
 
-// Cache for TMDB episode stills
 var tmdbEpisodeStillCache = struct {
 	sync.RWMutex
-	m map[string]string
-}{m: make(map[string]string)}
+	m map[string]struct {
+		Value     string
+		Timestamp time.Time
+	}
+}{m: make(map[string]struct {
+	Value     string
+	Timestamp time.Time
+})}
 
-// Cache for AniList search results (posterURL, score)
 var anilistSearchCache = struct {
 	sync.RWMutex
 	m map[string]struct {
 		PosterURL string
 		Score     string
+		Timestamp time.Time
 	}
 }{m: make(map[string]struct {
 	PosterURL string
 	Score     string
+	Timestamp time.Time
 })}
 
-// Cache for OMDb ratings
 var omdbRatingsCache = struct {
 	sync.RWMutex
-	m map[string]string
-}{m: make(map[string]string)}
+	m map[string]struct {
+		Value     string
+		Timestamp time.Time
+	}
+}{m: make(map[string]struct {
+	Value     string
+	Timestamp time.Time
+})}
 
-func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, lastItemID *string, lastPlayState *bool, lastPosTicks *float64) {
+var jellyfinArtworkCache = struct {
+	sync.RWMutex
+	m map[string]struct {
+		Value     string
+		Timestamp time.Time
+	}
+}{m: make(map[string]struct {
+	Value     string
+	Timestamp time.Time
+})}
+
+func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, lastItemID *string, lastPlayState *bool, lastPosTicks *float64, lastUpdateTime *time.Time, lastPoster *string, lastRatings *string, lastTMDBID *int, lastBuffering *bool) {
 	var lineOne, lineTwo, searchTitle, currentID, prodYear string
 	var posTicks, runTimeTicks float64
 	isPaused := false
@@ -91,8 +116,16 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 		}
 	}
 
-	diff := posTicks - *lastPosTicks
-	skipped := (diff > TicksPerSecond*SeekThresholdSeconds || diff < -TicksPerSecond*SeekThresholdSeconds) && currentID == *lastItemID && *lastPosTicks != 0
+	isBuffering := isPaused && posTicks < TicksPerSecond*5
+	now := time.Now()
+	elapsedTicks := float64(now.Sub(*lastUpdateTime).Seconds()) * TicksPerSecond
+	expectedPosTicks := *lastPosTicks
+	if !*lastPlayState && *lastItemID != "" {
+		expectedPosTicks += elapsedTicks
+	}
+	posDiff := posTicks - expectedPosTicks
+	skipped := (posDiff > TicksPerSecond*SeekThresholdSeconds || posDiff < -TicksPerSecond*SeekThresholdSeconds) && currentID == *lastItemID && *lastPosTicks != 0
+
 	var startUnix, endUnix int64
 	if currentID != "" && !isPaused && runTimeTicks > 0 {
 		startUnix = time.Now().Unix() - int64(posTicks/TicksPerSecond)
@@ -100,141 +133,244 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 	}
 
 	if currentID != "" {
-		if isPaused && !cfg.ShowPaused {
-			if *lastPlayState != isPaused {
+		if isPaused && !cfg.ShowPaused && !isBuffering {
+			if *lastPlayState != isPaused || *lastBuffering != isBuffering {
 				if err := drpc.ClearActivity(); err == nil {
-					*lastItemID = ""
+					*lastItemID = currentID
 					*lastPosTicks = 0
+					*lastBuffering = isBuffering
+					*lastUpdateTime = now
 					*lastPlayState = isPaused
 					logInfo("Playback paused (Status hidden):", lineOne)
 				} else {
 					logWarn("Failed to clear Discord activity (paused/hidden):", err.Error())
 				}
 			}
-		} else if currentID != *lastItemID || isPaused != *lastPlayState || skipped {
-			var poster string
-			var tmdbID int
+		} else if currentID != *lastItemID || isPaused != *lastPlayState || skipped || isBuffering != *lastBuffering {
+			if currentID != *lastItemID {
+				var poster string
+				var tmdbID int
+				var ratings string
+				isAnime := isItemAnime(*targetItem, cfg)
 
-			// Determine if the item is anime based on Jellyfin tags
-			isAnime := isItemAnime(*targetItem, cfg)
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
 
-			// Prioritize external APIs first, then fallback to Jellyfin artwork.
-			// This aligns with the user's request to use free external APIs and
-			// only use Jellyfin as a fallback.
-
-			if isAudio {
-				artistName := ""
-				if len(targetItem.NowPlayingItem.Artists) > 0 {
-					artistName = targetItem.NowPlayingItem.Artists[0]
-				}
-
-				// 1. Try iTunes (most common for popular music)
-				if artistName != "" && targetItem.NowPlayingItem.Album != "" {
-					poster = searchiTunes(artistName+" "+targetItem.NowPlayingItem.Album, artistName)
-				}
-				if poster == "" {
-					poster = searchiTunes(searchTitle, artistName) // Artist - Track
-				}
-				if poster == "" && targetItem.NowPlayingItem.Album != "" {
-					poster = searchiTunes(targetItem.NowPlayingItem.Album, artistName)
-				}
-				if poster == "" && lineOne != "" {
-					poster = searchiTunes(lineOne, artistName) // Track name
-				}
-
-				// 2. If iTunes fails, try MusicBrainz/Cover Art Archive
-				if poster == "" {
-					logInfo("Image Fetch", "iTunes search failed, attempting MusicBrainz/Cover Art Archive.")
-					if artistName != "" && targetItem.NowPlayingItem.Album != "" {
-						poster = searchMusicBrainz(artistName+" "+targetItem.NowPlayingItem.Album, artistName)
-					}
-					if poster == "" {
-						poster = searchMusicBrainz(searchTitle, artistName) // Artist - Track
-					}
-					if poster == "" && targetItem.NowPlayingItem.Album != "" {
-						poster = searchMusicBrainz(targetItem.NowPlayingItem.Album, artistName)
-					}
-					if poster == "" && lineOne != "" {
-						poster = searchMusicBrainz(lineOne, artistName) // Track name
-					}
-				}
-			} else { // Video items
-				// 1. Prioritize AniList if enabled and item is detected as anime
-				if cfg.AnilistEnabled && isAnime {
-					logInfo("Image Fetch", fmt.Sprintf("Attempting AniList search for anime: %s", searchTitle))
-					poster, _ = searchAniList(searchTitle)
-					if poster != "" {
-						logInfo("Image Fetch", fmt.Sprintf("AniList search successful, poster found: %s", poster))
-					}
-				}
-
-				// 2. Fallback to TMDB if AniList is not enabled/didn't find anything, or if not anime
-				if poster == "" {
-					if cfg.TMDBAPIKey != "" {
-						// Try lookup by ID first if available (mostly for Movies)
-						if tid, ok := targetItem.NowPlayingItem.ProviderIds["Tmdb"]; ok && tid != "" && (targetItem.NowPlayingItem.Type == "Movie" || targetItem.NowPlayingItem.Type == "Series") {
-							poster = getTMDBPosterByID(cfg.TMDBAPIKey, tid, targetItem.NowPlayingItem.Type)
-							if poster != "" {
-								fmt.Sscanf(tid, "%d", &tmdbID)
-							}
-						}
-
-						if poster == "" {
-							logInfo("Image Fetch", fmt.Sprintf("Attempting TMDB search for: %s", searchTitle))
-							poster, tmdbID = searchTMDB(cfg.TMDBAPIKey, searchTitle, prodYear, targetItem.NowPlayingItem.Type)
-							if poster != "" {
-								logInfo("Image Fetch", fmt.Sprintf("TMDB search successful, poster found: %s", poster))
-							}
-						}
-					} else {
-						logWarn("Image Fetch", "TMDB API Key is missing in config.json. TMDB images will not be fetched.")
-					}
-				}
-
-				// 3. TMDB Episode Still fallback (only if a TMDB ID was found for the series)
-				if poster == "" && !isAudio && cfg.EpisodeThumbnails && sNum > 0 && eNum > 0 && tmdbID != 0 {
-					logInfo("Image Fetch", fmt.Sprintf("Attempting TMDB episode still search for: %s S%.0fE%.0f", searchTitle, sNum, eNum))
-					if still := getTMDBEpisodeStill(cfg.TMDBAPIKey, tmdbID, sNum, eNum); still != "" { // Only try if tmdbID is valid
-						poster = still
-						logInfo("Image Fetch", fmt.Sprintf("TMDB episode still found: %s", poster))
-					}
-				}
-			}
-
-			// Final Fallback: Jellyfin internal artwork if all external providers fail
-			if poster == "" {
-				logInfo("Image Fetch", "External image providers failed, falling back to Jellyfin artwork.")
-				imageID := currentID
 				if isAudio {
-					if targetItem.NowPlayingItem.AlbumId != "" {
-						imageID = targetItem.NowPlayingItem.AlbumId
-					} else if targetItem.NowPlayingItem.ParentId != "" { // Try ParentId (often album folder)
-						imageID = targetItem.NowPlayingItem.ParentId
+					artistName := ""
+					if len(targetItem.NowPlayingItem.Artists) > 0 {
+						artistName = targetItem.NowPlayingItem.Artists[0]
 					}
-				} else if targetItem.NowPlayingItem.Type == "Episode" && targetItem.NowPlayingItem.SeriesId != "" {
-					if !cfg.EpisodeThumbnails { // If episode thumbnails are NOT enabled, use series poster
-						imageID = targetItem.NowPlayingItem.SeriesId
+					albumName := targetItem.NowPlayingItem.Album
+
+					type searchReq struct {
+						fn    func(context.Context, string, string) string
+						query string
 					}
-				}
-				jellyfinFallbackURL := getJellyfinArtwork(cfg.JellyfinURL, cfg.JellyfinToken, imageID)
-				if isValidImageURL(jellyfinFallbackURL) {
-					poster = jellyfinFallbackURL
-					logInfo("Image Fetch", fmt.Sprintf("Jellyfin artwork fallback successful, poster found: %s", poster))
+					var requests []searchReq
+					seen := make(map[string]bool)
+					addReq := func(f func(context.Context, string, string) string, q string, prefix string) {
+						key := prefix + q
+						if q != "" && !seen[key] {
+							requests = append(requests, searchReq{f, q})
+							seen[key] = true
+						}
+					}
+
+					if artistName != "" && albumName != "" {
+						addReq(searchiTunes, artistName+" "+albumName, "itunes:")
+					}
+					addReq(searchiTunes, searchTitle, "itunes:")
+					if albumName != "" {
+						addReq(searchiTunes, albumName, "itunes:")
+					}
+					addReq(searchiTunes, lineOne, "itunes:")
+
+					if artistName != "" && albumName != "" {
+						addReq(searchMusicBrainz, artistName+" "+albumName, "mb:")
+					}
+					addReq(searchMusicBrainz, searchTitle, "mb:")
+					if albumName != "" {
+						addReq(searchMusicBrainz, albumName, "mb:")
+					}
+					addReq(searchMusicBrainz, lineOne, "mb:")
+
+					type res struct {
+						idx int
+						url string
+					}
+					c := make(chan res, len(requests))
+					for i, req := range requests {
+						go func(idx int, r searchReq) {
+							c <- res{idx, r.fn(ctx, r.query, artistName)}
+						}(i, req)
+					}
+
+					results := make([]string, len(requests))
+
+					for finished := 0; finished < len(requests); {
+						select {
+						case r := <-c:
+							results[r.idx] = r.url
+							finished++
+							if r.idx == 0 && r.url != "" {
+								cancel()
+								goto audioFound
+							}
+						case <-ctx.Done():
+							goto audioFound
+						}
+					}
+				audioFound:
+					for _, r := range results {
+						if r != "" {
+							poster = r
+							break
+						}
+					}
 				} else {
-					logWarn("Image Fetch", fmt.Sprintf("Jellyfin artwork fallback URL (%s) is not valid or accessible.", jellyfinFallbackURL))
+					type videoResult struct {
+						idx    int
+						poster string
+						id     int
+					}
+					resultsChan := make(chan videoResult, 3)
+					var wg sync.WaitGroup
+
+					if cfg.AnilistEnabled && isAnime {
+						wg.Add(1)
+						go func() {
+							defer wg.Done()
+							p, _ := searchAniList(ctx, searchTitle)
+							resultsChan <- videoResult{idx: 0, poster: p}
+						}()
+					}
+
+					tid, hasTID := targetItem.NowPlayingItem.ProviderIds["Tmdb"]
+					if cfg.TMDBAPIKey != "" && hasTID && tid != "" && (targetItem.NowPlayingItem.Type == "Movie" || targetItem.NowPlayingItem.Type == "Series" || targetItem.NowPlayingItem.Type == "Episode") {
+						wg.Add(1)
+						go func() {
+							defer wg.Done()
+							p := getTMDBPosterByID(ctx, cfg.TMDBAPIKey, tid, targetItem.NowPlayingItem.Type)
+							var id int
+							fmt.Sscanf(tid, "%d", &id)
+							resultsChan <- videoResult{idx: 1, poster: p, id: id}
+						}()
+					}
+
+					if cfg.TMDBAPIKey != "" {
+						wg.Add(1)
+						go func() {
+							defer wg.Done()
+							p, id := searchTMDB(ctx, cfg.TMDBAPIKey, searchTitle, prodYear, targetItem.NowPlayingItem.Type)
+							resultsChan <- videoResult{idx: 2, poster: p, id: id}
+						}()
+					}
+
+					go func() {
+						wg.Wait()
+						close(resultsChan)
+					}()
+
+					videoResults := make(map[int]videoResult)
+
+				collectVideo:
+					for {
+						select {
+						case res, ok := <-resultsChan:
+							if !ok {
+								break collectVideo
+							}
+							videoResults[res.idx] = res
+							if res.idx == 0 && res.poster != "" {
+								cancel()
+								break collectVideo
+							}
+						case <-ctx.Done():
+							break collectVideo
+						}
+					}
+
+					for i := 0; i <= 2; i++ {
+						if res, ok := videoResults[i]; ok {
+							if tmdbID == 0 {
+								tmdbID = res.id
+							}
+							if poster == "" && res.poster != "" {
+								poster = res.poster
+								logInfo("Search", fmt.Sprintf("Video search successful (Source %d), poster: %s", i, poster))
+							}
+						}
+					}
+
+					if poster == "" && cfg.EpisodeThumbnails && sNum > 0 && eNum > 0 && tmdbID != 0 {
+						if still := getTMDBEpisodeStill(ctx, cfg.TMDBAPIKey, tmdbID, sNum, eNum); still != "" {
+							poster = still
+						}
+					}
 				}
 
-			}
+				if poster == "" {
+					logInfo("Image Fetch", "External image providers failed, falling back to Jellyfin artwork.")
+					imageID := currentID
+					if isAudio {
+						if targetItem.NowPlayingItem.AlbumId != "" {
+							imageID = targetItem.NowPlayingItem.AlbumId
+						} else if targetItem.NowPlayingItem.ParentId != "" {
+							imageID = targetItem.NowPlayingItem.ParentId
+						}
+					} else if targetItem.NowPlayingItem.Type == "Episode" && targetItem.NowPlayingItem.SeriesId != "" {
+						if !cfg.EpisodeThumbnails {
+							imageID = targetItem.NowPlayingItem.SeriesId
+						}
+					}
 
-			if poster == "" {
-				logWarn("Image Fetch", fmt.Sprintf("No image found for item after all attempts: %s. Using placeholder.", lineOne))
-				poster = PlaceholderImageURL
-			}
+					jellyfinArtworkCache.RLock()
+					if cached, ok := jellyfinArtworkCache.m[imageID]; ok && time.Since(cached.Timestamp) < CacheTTL {
+						poster = cached.Value
+						jellyfinArtworkCache.RUnlock()
+					} else {
+						jellyfinArtworkCache.RUnlock()
+						logInfo("Search", "External providers failed, falling back to Jellyfin artwork.")
+						jellyfinFallbackURL := getJellyfinArtwork(cfg.JellyfinURL, cfg.JellyfinToken, imageID)
+						if isValidImageURL(jellyfinFallbackURL) {
+							poster = jellyfinFallbackURL
+							logInfo("Search", fmt.Sprintf("Jellyfin artwork fallback successful: %s", poster))
+						} else {
+							logWarn("Search", fmt.Sprintf("Jellyfin artwork fallback URL (%s) is not valid or accessible.", jellyfinFallbackURL))
+						}
+						jellyfinArtworkCache.Lock()
+						jellyfinArtworkCache.m[imageID] = struct {
+							Value     string
+							Timestamp time.Time
+						}{Value: poster, Timestamp: time.Now()}
+						jellyfinArtworkCache.Unlock()
+					}
+				}
 
-			ratings := getRatings(cfg.OMDBAPIKey, searchTitle, prodYear)
+				if poster == "" {
+					poster = PlaceholderImageURL
+				}
+
+				if !isAudio {
+					ratings = getRatings(cfg.OMDBAPIKey, searchTitle, prodYear)
+				}
+
+				if poster == "" {
+					if poster != "" {
+						logWarn("Search", fmt.Sprintf("No image found for: %s. Using placeholder.", lineOne))
+					} else {
+						logWarn("Search", fmt.Sprintf("No image found for: %s. Using Discord default.", lineOne))
+					}
+				}
+
+				*lastPoster = poster
+				*lastRatings = ratings
+				*lastTMDBID = tmdbID
+			}
 
 			activity := Activity{
-				Assets: Assets{LargeImage: poster},
+				Assets: Assets{LargeImage: *lastPoster},
 				Type:   3,
 			}
 
@@ -243,18 +379,23 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 			}
 
 			if isPaused {
+				statePrefix := "Paused"
+				if isBuffering {
+					statePrefix = "Buffering"
+				}
+
 				activity.Details = lineOne
-				if ratings != "" {
-					activity.State = "Paused | " + ratings
+				if *lastRatings != "" {
+					activity.State = statePrefix + " | " + *lastRatings
 				} else {
-					activity.State = "Paused"
+					activity.State = statePrefix
 				}
 				activity.Assets.SmallImage = "https://images.weserv.nl/?url=" + url.QueryEscape(PauseIconURL) + "&w=64&h=64&inv"
-				logInfo("Status updated (Paused):", lineOne)
+				logInfo("Status", statePrefix+": "+lineOne)
 			} else {
 				activity.Details = lineOne
-				if ratings != "" {
-					activity.State = fmt.Sprintf("%s | %s", lineTwo, ratings)
+				if *lastRatings != "" {
+					activity.State = fmt.Sprintf("%s | %s", lineTwo, *lastRatings)
 				} else {
 					activity.State = lineTwo
 				}
@@ -264,26 +405,103 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 						End:   endUnix,
 					}
 				}
-				logInfo("Status updated (Playing/Skipped):", fmt.Sprintf("%s - %s", lineOne, lineTwo))
+				logInfo("Status", fmt.Sprintf("Playing/Skipped: %s - %s", lineOne, lineTwo))
 			}
 
 			if err := drpc.SetActivity(&activity); err == nil {
-				*lastItemID, *lastPlayState, *lastPosTicks = currentID, isPaused, posTicks
+				*lastItemID, *lastPlayState, *lastPosTicks, *lastUpdateTime, *lastBuffering = currentID, isPaused, posTicks, now, isBuffering
 			} else {
 				logWarn("Failed to update Discord activity:", err.Error())
 			}
 		}
 	} else if currentID == "" && *lastItemID != "" {
 		if err := drpc.ClearActivity(); err == nil {
-			logInfo("Playback stopped", "")
+			logInfo("Status", "Playback stopped")
 			*lastItemID = ""
 			*lastPosTicks = 0
+			*lastUpdateTime = now
+			*lastPoster = ""
+			*lastRatings = ""
+			*lastTMDBID = 0
+			*lastBuffering = false
 		} else {
 			logWarn("Failed to clear Discord activity (stopped):", err.Error())
 		}
 	} else if currentID == "" && *lastItemID == "" {
 		*lastPosTicks = 0
+		*lastUpdateTime = now
+		*lastPoster = ""
+		*lastRatings = ""
+		*lastTMDBID = 0
+		*lastBuffering = false
 	}
+}
+
+func startCacheCleanup() {
+	ticker := time.NewTicker(1 * time.Hour)
+	go func() {
+		for range ticker.C {
+			start := time.Now()
+
+			tmdbSearchCache.Lock()
+			for k, v := range tmdbSearchCache.m {
+				if time.Since(v.Timestamp) > CacheTTL {
+					delete(tmdbSearchCache.m, k)
+				}
+			}
+			tmdbSearchCache.Unlock()
+
+			tmdbEpisodeStillCache.Lock()
+			for k, v := range tmdbEpisodeStillCache.m {
+				if time.Since(v.Timestamp) > CacheTTL {
+					delete(tmdbEpisodeStillCache.m, k)
+				}
+			}
+			tmdbEpisodeStillCache.Unlock()
+
+			anilistSearchCache.Lock()
+			for k, v := range anilistSearchCache.m {
+				if time.Since(v.Timestamp) > CacheTTL {
+					delete(anilistSearchCache.m, k)
+				}
+			}
+			anilistSearchCache.Unlock()
+
+			omdbRatingsCache.Lock()
+			for k, v := range omdbRatingsCache.m {
+				if time.Since(v.Timestamp) > CacheTTL {
+					delete(omdbRatingsCache.m, k)
+				}
+			}
+			omdbRatingsCache.Unlock()
+
+			itunesSearchCache.Lock()
+			for k, v := range itunesSearchCache.m {
+				if time.Since(v.Timestamp) > CacheTTL {
+					delete(itunesSearchCache.m, k)
+				}
+			}
+			itunesSearchCache.Unlock()
+
+			musicbrainzSearchCache.Lock()
+			for k, v := range musicbrainzSearchCache.m {
+				if time.Since(v.Timestamp) > CacheTTL {
+					delete(musicbrainzSearchCache.m, k)
+				}
+			}
+			musicbrainzSearchCache.Unlock()
+
+			jellyfinArtworkCache.Lock()
+			for k, v := range jellyfinArtworkCache.m {
+				if time.Since(v.Timestamp) > CacheTTL {
+					delete(jellyfinArtworkCache.m, k)
+				}
+			}
+			jellyfinArtworkCache.Unlock()
+
+			logInfo("Cache", fmt.Sprintf("Periodic cleanup completed in %v", time.Since(start).Truncate(time.Microsecond)))
+		}
+	}()
 }
 
 func main() {
@@ -296,9 +514,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	startCacheCleanup()
+
 	sig := make(chan os.Signal, 1)
 
-	// Only notify on SIGHUP if the platform supports it
 	if reloadSig := getReloadSignal(); reloadSig != nil {
 		signal.Notify(sig, reloadSig)
 	}
@@ -326,6 +545,11 @@ func main() {
 	var lastItemID string
 	var lastPlayState bool
 	var lastPosTicks float64
+	var lastBuffering bool
+	var lastPoster string
+	var lastRatings string
+	var lastTMDBID int
+	lastUpdateTime := time.Now()
 
 	for {
 		select {
@@ -351,7 +575,6 @@ func main() {
 			drpc, err = connectDiscord(cfg.DiscordAppID)
 			if err == nil {
 				logInfo("Late connection to Discord established", "")
-				// Reset state to force an update on next poll
 				lastItemID = ""
 				lastPosTicks = 0
 			}
@@ -394,7 +617,7 @@ func main() {
 			continue
 		}
 
-		updateActivity(drpc, cfg, sessions, &lastItemID, &lastPlayState, &lastPosTicks)
+		updateActivity(drpc, cfg, sessions, &lastItemID, &lastPlayState, &lastPosTicks, &lastUpdateTime, &lastPoster, &lastRatings, &lastTMDBID, &lastBuffering)
 		time.Sleep(time.Duration(cfg.PollInterval) * time.Second)
 	}
 }

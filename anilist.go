@@ -2,20 +2,22 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 )
 
-func searchAniList(query string) (posterURL string, score string) {
+func searchAniList(ctx context.Context, query string) (posterURL string, score string) {
 	anilistSearchCache.RLock()
-	if cached, ok := anilistSearchCache.m[query]; ok {
+	if cached, ok := anilistSearchCache.m[query]; ok && time.Since(cached.Timestamp) < CacheTTL {
 		anilistSearchCache.RUnlock()
 		return cached.PosterURL, cached.Score
 	}
 	anilistSearchCache.RUnlock()
 
-	logInfo("AniList Search", fmt.Sprintf("Searching for query: %s", query))
+	start := time.Now()
 	jsonData := map[string]interface{}{
 		"query": `
 			query ($search: String) {
@@ -28,19 +30,26 @@ func searchAniList(query string) (posterURL string, score string) {
 	}
 
 	body, _ := json.Marshal(jsonData)
-	logInfo("AniList Search", fmt.Sprintf("AniList GraphQL request for query: %s", query))
-	req, err := http.NewRequest("POST", "https://graphql.anilist.co", bytes.NewBuffer(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://graphql.anilist.co", bytes.NewBuffer(body))
 	if err != nil {
 		return "", ""
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// No specific log for request URL as it's always "https://graphql.anilist.co"
 	resp, err := httpClient.Do(req)
-	if err != nil || resp.StatusCode != 200 {
+	if err != nil {
+		if ctx.Err() == nil {
+			logWarn("AniList", fmt.Sprintf("API request failed: %v", err))
+		}
 		return "", ""
 	}
 	defer resp.Body.Close()
+
+	duration := time.Since(start).Truncate(time.Millisecond)
+	if resp.StatusCode != 200 {
+		logWarn("AniList", fmt.Sprintf("API request failed in %v: status %d", duration, resp.StatusCode))
+		return "", ""
+	}
 
 	var res struct {
 		Data struct {
@@ -54,7 +63,9 @@ func searchAniList(query string) (posterURL string, score string) {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		logWarn("AniList Search", fmt.Sprintf("AniList JSON decode error: %v", err))
+		if ctx.Err() == nil {
+			logWarn("AniList", fmt.Sprintf("JSON decode error: %v", err))
+		}
 		return "", ""
 	}
 
@@ -63,14 +74,29 @@ func searchAniList(query string) (posterURL string, score string) {
 		score = fmt.Sprintf("❤️ %d%%", res.Data.Media.AverageScore)
 	}
 	if posterURL != "" {
-		logInfo("AniList Search", fmt.Sprintf("AniList found artwork: %s (Score: %s)", posterURL, score))
+		if ctx.Err() != nil {
+			return "", ""
+		}
+		logInfo("AniList", fmt.Sprintf("Found artwork in %v: %s (Score: %s)", duration, posterURL, score))
 		anilistSearchCache.Lock()
 		anilistSearchCache.m[query] = struct {
 			PosterURL string
 			Score     string
-		}{PosterURL: posterURL, Score: score}
+			Timestamp time.Time
+		}{PosterURL: posterURL, Score: score, Timestamp: time.Now()}
 		anilistSearchCache.Unlock()
+		return posterURL, score
 	}
-	logInfo("AniList Search", fmt.Sprintf("AniList search found no artwork for query: %s", query))
+	if ctx.Err() != nil {
+		return "", ""
+	}
+	logInfo("AniList", fmt.Sprintf("No artwork found in %v for query: %s", duration, query))
+	anilistSearchCache.Lock()
+	anilistSearchCache.m[query] = struct {
+		PosterURL string
+		Score     string
+		Timestamp time.Time
+	}{PosterURL: "", Score: "", Timestamp: time.Now()}
+	anilistSearchCache.Unlock()
 	return
 }

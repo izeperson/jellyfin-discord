@@ -1,19 +1,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
+	"time"
 )
 
-func getTMDBPosterByID(apiKey string, tmdbID string, itemType string) string {
+func getTMDBPosterByID(ctx context.Context, apiKey string, tmdbID string, itemType string) string {
 	if apiKey == "" || tmdbID == "" {
 		return ""
 	}
 
 	cacheKey := fmt.Sprintf("ID|%s|%s", itemType, tmdbID)
 	tmdbSearchCache.RLock()
-	if cached, ok := tmdbSearchCache.m[cacheKey]; ok {
+	if cached, ok := tmdbSearchCache.m[cacheKey]; ok && time.Since(cached.Timestamp) < CacheTTL {
 		tmdbSearchCache.RUnlock()
 		return cached.PosterURL
 	}
@@ -24,14 +27,28 @@ func getTMDBPosterByID(apiKey string, tmdbID string, itemType string) string {
 		category = "tv"
 	}
 
-	logInfo("TMDB Lookup", fmt.Sprintf("Fetching poster for TMDB ID: %s (%s)", tmdbID, category))
+	start := time.Now()
 	apiURL := fmt.Sprintf("https://api.themoviedb.org/3/%s/%s?api_key=%s", category, tmdbID, apiKey)
-	resp, err := httpClient.Get(apiURL)
-	if err != nil || resp.StatusCode != 200 {
-		logWarn("TMDB Lookup", fmt.Sprintf("TMDB ID lookup failed for %s: %v", tmdbID, err))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return ""
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() == nil {
+			logWarn("TMDB", fmt.Sprintf("ID lookup failed for %s: %v", tmdbID, err))
+		}
 		return ""
 	}
 	defer resp.Body.Close()
+
+	duration := time.Since(start).Truncate(time.Millisecond)
+	if resp.StatusCode != 200 {
+		logWarn("TMDB", fmt.Sprintf("ID lookup failed in %v for %s: status %d", duration, tmdbID, resp.StatusCode))
+		return ""
+	}
 
 	var res struct {
 		PosterPath string `json:"poster_path"`
@@ -44,12 +61,17 @@ func getTMDBPosterByID(apiKey string, tmdbID string, itemType string) string {
 	if res.PosterPath != "" {
 		rawURL := "https://image.tmdb.org/t/p/w500" + res.PosterPath
 		posterURL := fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512", url.QueryEscape(rawURL))
+		if ctx.Err() != nil {
+			return ""
+		}
+		logInfo("TMDB", fmt.Sprintf("ID lookup successful in %v for %s: %s", duration, tmdbID, posterURL))
 
 		tmdbSearchCache.Lock()
 		tmdbSearchCache.m[cacheKey] = struct {
 			PosterURL string
 			TMDBID    int
-		}{PosterURL: posterURL, TMDBID: res.ID}
+			Timestamp time.Time
+		}{PosterURL: posterURL, TMDBID: res.ID, Timestamp: time.Now()}
 		tmdbSearchCache.Unlock()
 
 		return posterURL
@@ -58,14 +80,14 @@ func getTMDBPosterByID(apiKey string, tmdbID string, itemType string) string {
 	return ""
 }
 
-func searchTMDB(apiKey string, query string, year string, itemType string) (posterURL string, tmdbID int) {
+func searchTMDB(ctx context.Context, apiKey string, query string, year string, itemType string) (posterURL string, tmdbID int) {
 	cacheKey := fmt.Sprintf("%s|%s|%s", itemType, query, year)
 	if year == "" || year == "0" {
 		cacheKey = fmt.Sprintf("%s|%s", itemType, query)
 	}
 
 	tmdbSearchCache.RLock()
-	if cached, ok := tmdbSearchCache.m[cacheKey]; ok {
+	if cached, ok := tmdbSearchCache.m[cacheKey]; ok && time.Since(cached.Timestamp) < CacheTTL {
 		tmdbSearchCache.RUnlock()
 		return cached.PosterURL, cached.TMDBID
 	}
@@ -94,27 +116,38 @@ func searchTMDB(apiKey string, query string, year string, itemType string) (post
 	}
 
 	performSearch := func(searchQuery string, searchYear string) bool {
-		logInfo("TMDB Search", fmt.Sprintf("Searching for %s: %s", endpoint, searchQuery))
 		searchURL := fmt.Sprintf("https://api.themoviedb.org/3/search/%s?api_key=%s&query=%s", endpoint, apiKey, url.QueryEscape(searchQuery))
 		if searchYear != "" && searchYear != "0" && yearParam != "" {
 			searchURL += fmt.Sprintf("&%s=%s", yearParam, searchYear)
 		}
 
-		logInfo("TMDB Search", fmt.Sprintf("TMDB API request: %s", searchURL))
-		resp, err := httpClient.Get(searchURL)
-		if err != nil || resp.StatusCode != 200 {
-			logWarn("TMDB Search", fmt.Sprintf("TMDB request failed for '%s': %v", searchQuery, err))
+		req, err := http.NewRequestWithContext(ctx, "GET", searchURL, nil)
+		if err != nil {
+			return false
+		}
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			if ctx.Err() == nil {
+				logWarn("TMDB", fmt.Sprintf("Search request failed for '%s': %v", searchQuery, err))
+			}
 			return false
 		}
 		defer resp.Body.Close()
 
+		if resp.StatusCode != 200 {
+			logWarn("TMDB", fmt.Sprintf("Search request failed for '%s': status %d", searchQuery, resp.StatusCode))
+			return false
+		}
+
 		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-			logWarn("TMDB Search", fmt.Sprintf("TMDB JSON decode error for '%s': %v", searchQuery, err))
+			logWarn("TMDB", fmt.Sprintf("JSON decode error for '%s': %v", searchQuery, err))
 			return false
 		}
 		return len(res.Results) > 0 && res.Results[0].PosterPath != ""
 	}
 
+	start := time.Now()
 	found := false
 	if year != "" && year != "0" {
 		found = performSearch(query, year)
@@ -122,69 +155,101 @@ func searchTMDB(apiKey string, query string, year string, itemType string) (post
 
 	if !found {
 		if year != "" && year != "0" {
-			logInfo("TMDB Search", "Search with year failed, trying without year...")
+			logInfo("TMDB", "Search with year failed, trying without year...")
 		}
 		found = performSearch(query, "")
 	}
 
+	duration := time.Since(start).Truncate(time.Millisecond)
 	if found {
-		logInfo("TMDB Search", fmt.Sprintf("TMDB found poster: %s", res.Results[0].PosterPath))
 		rawURL := "https://image.tmdb.org/t/p/w500" + res.Results[0].PosterPath
 		posterURL = fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512", url.QueryEscape(rawURL))
 		tmdbID = res.Results[0].ID
+		if ctx.Err() != nil {
+			return "", 0
+		}
+		logInfo("TMDB", fmt.Sprintf("Search successful in %v: %s", duration, posterURL))
 
 		tmdbSearchCache.Lock()
 		tmdbSearchCache.m[cacheKey] = struct {
 			PosterURL string
 			TMDBID    int
-		}{PosterURL: posterURL, TMDBID: tmdbID}
+			Timestamp time.Time
+		}{PosterURL: posterURL, TMDBID: tmdbID, Timestamp: time.Now()}
 		tmdbSearchCache.Unlock()
 
 		return posterURL, tmdbID
 	}
-	logInfo("TMDB Search", fmt.Sprintf("TMDB found no poster for: %s", query))
+	if ctx.Err() != nil {
+		return "", 0
+	}
+	logInfo("TMDB", fmt.Sprintf("No poster found in %v for: %s", duration, query))
 	return
 }
 
-func getTMDBEpisodeStill(apiKey string, tmdbID int, seasonNum, epNum float64) string {
+func getTMDBEpisodeStill(ctx context.Context, apiKey string, tmdbID int, seasonNum, epNum float64) string {
 	if tmdbID == 0 {
 		return ""
 	}
 	cacheKey := fmt.Sprintf("%d-S%.0fE%.0f", tmdbID, seasonNum, epNum)
 	tmdbEpisodeStillCache.RLock()
-	if cached, ok := tmdbEpisodeStillCache.m[cacheKey]; ok {
+	if cached, ok := tmdbEpisodeStillCache.m[cacheKey]; ok && time.Since(cached.Timestamp) < CacheTTL {
 		tmdbEpisodeStillCache.RUnlock()
-		return cached
+		return cached.Value
 	}
 	tmdbEpisodeStillCache.RUnlock()
-	logInfo("TMDB Episode Still", fmt.Sprintf("Searching for episode still: %s", cacheKey))
+	start := time.Now()
 	apiURL := fmt.Sprintf("https://api.themoviedb.org/3/tv/%d/season/%.0f/episode/%.0f/images?api_key=%s", tmdbID, seasonNum, epNum, apiKey)
-	logInfo("TMDB Episode Still", fmt.Sprintf("TMDB episode still API request: %s", apiURL))
-	resp, err := httpClient.Get(apiURL)
-	if err != nil || resp.StatusCode != 200 {
-		logWarn("TMDB Episode Still", fmt.Sprintf("TMDB episode still API request failed: %v, status %d", err, resp.StatusCode))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return ""
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() == nil {
+			logWarn("TMDB", fmt.Sprintf("Episode still API request failed: %v", err))
+		}
 		return ""
 	}
 	defer resp.Body.Close()
+
+	duration := time.Since(start).Truncate(time.Millisecond)
+	if resp.StatusCode != 200 {
+		logWarn("TMDB", fmt.Sprintf("Episode still API request failed in %v: status %d", duration, resp.StatusCode))
+		return ""
+	}
 	var res struct {
 		Stills []struct {
 			FilePath string `json:"file_path"`
 		} `json:"stills"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		logWarn("TMDB Episode Still", fmt.Sprintf("TMDB episode still JSON decode error: %v", err))
+		if ctx.Err() == nil {
+			logWarn("TMDB", fmt.Sprintf("Episode still JSON decode error: %v", err))
+		}
 		return ""
 	}
 
 	if len(res.Stills) > 0 && res.Stills[0].FilePath != "" {
-		logInfo("TMDB Episode Still", fmt.Sprintf("TMDB episode still found for %s: %s", cacheKey, res.Stills[0].FilePath))
 		rawURL := "https://image.tmdb.org/t/p/w500" + res.Stills[0].FilePath
 		posterURL := fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512", url.QueryEscape(rawURL))
+		if ctx.Err() != nil {
+			return ""
+		}
+		logInfo("TMDB", fmt.Sprintf("Episode still found in %v for %s: %s", duration, cacheKey, posterURL))
 		tmdbEpisodeStillCache.Lock()
-		tmdbEpisodeStillCache.m[cacheKey] = posterURL
+		tmdbEpisodeStillCache.m[cacheKey] = struct {
+			Value     string
+			Timestamp time.Time
+		}{Value: posterURL, Timestamp: time.Now()}
 		tmdbEpisodeStillCache.Unlock()
 		return posterURL
 	}
-	logInfo("TMDB Episode Still", fmt.Sprintf("TMDB episode still found no image for: %s", cacheKey))
+	if ctx.Err() != nil {
+		return ""
+	}
+	logInfo("TMDB", fmt.Sprintf("No episode still found in %v for: %s", duration, cacheKey))
 	return ""
 }

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -10,37 +12,75 @@ import (
 
 var musicbrainzSearchCache = struct {
 	sync.RWMutex
-	m map[string]string
-}{m: make(map[string]string)}
+	m map[string]struct {
+		Value     string
+		Timestamp time.Time
+	}
+}{m: make(map[string]struct {
+	Value     string
+	Timestamp time.Time
+})}
 
-func searchMusicBrainz(query string, expectedArtist string) string {
+var (
+	mbCircuitOpenUntil time.Time
+	mbCircuitLock      sync.RWMutex
+)
+
+func searchMusicBrainz(ctx context.Context, query string, expectedArtist string) string {
+	mbCircuitLock.RLock()
+	if time.Now().Before(mbCircuitOpenUntil) {
+		mbCircuitLock.RUnlock()
+		logWarn("MusicBrainz", "Circuit breaker is open. Skipping request due to recent rate limiting (503).")
+		return ""
+	}
+	mbCircuitLock.RUnlock()
+
 	cacheKey := query + "|" + expectedArtist
 	musicbrainzSearchCache.RLock()
-	if cached, ok := musicbrainzSearchCache.m[cacheKey]; ok {
+	if cached, ok := musicbrainzSearchCache.m[cacheKey]; ok && time.Since(cached.Timestamp) < CacheTTL {
 		musicbrainzSearchCache.RUnlock()
-		return cached
+		return cached.Value
 	}
 	musicbrainzSearchCache.RUnlock()
 
-	logInfo("MusicBrainz Search", fmt.Sprintf("Searching for query: %s", query))
+	start := time.Now()
 
 	var mbQuery string
 	if expectedArtist != "" {
-		// Use advanced query syntax for strict artist matching
 		mbQuery = fmt.Sprintf("artist:\"%s\" AND (release:\"%s\" OR \"%s\")", expectedArtist, query, query)
 	} else {
 		mbQuery = query
 	}
 
-	// Search for releases (albums) first, as they are more likely to have cover art
 	searchURL := fmt.Sprintf("https://musicbrainz.org/ws/2/release/?query=%s&fmt=json&limit=1", url.QueryEscape(mbQuery))
-	logInfo("MusicBrainz Search", fmt.Sprintf("MusicBrainz API request (release): %s", searchURL))
-	resp, err := httpClient.Get(searchURL)
-	if err != nil || resp.StatusCode != 200 {
-		logWarn("MusicBrainz Search", fmt.Sprintf("MusicBrainz release API request failed: %v, status %d", err, resp.StatusCode))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", searchURL, nil)
+	if err != nil {
+		return ""
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() == nil {
+			logWarn("MusicBrainz", fmt.Sprintf("API request failed: %v", err))
+		}
 		return ""
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == 503 {
+		mbCircuitLock.Lock()
+		mbCircuitOpenUntil = time.Now().Add(5 * time.Minute)
+		mbCircuitLock.Unlock()
+		logError("MusicBrainz", "Received 503 Rate Limit. Opening circuit breaker for 5 minutes.")
+		return ""
+	}
+
+	duration := time.Since(start).Truncate(time.Millisecond)
+	if resp.StatusCode != 200 {
+		logWarn("MusicBrainz", fmt.Sprintf("API request failed in %v: status %d", duration, resp.StatusCode))
+		return ""
+	}
 
 	var res struct {
 		Releases []struct {
@@ -48,38 +88,40 @@ func searchMusicBrainz(query string, expectedArtist string) string {
 		} `json:"releases"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		logWarn("MusicBrainz Search", fmt.Sprintf("MusicBrainz JSON decode error (release): %v", err))
+		if ctx.Err() == nil {
+			logWarn("MusicBrainz", fmt.Sprintf("JSON decode error: %v", err))
+		}
 		return ""
 	}
 
 	if len(res.Releases) > 0 {
 		mbid := res.Releases[0].ID
-		// Construct Cover Art Archive URL
 		posterURL := fmt.Sprintf("https://coverartarchive.org/release/%s/front", mbid)
-		logInfo("MusicBrainz Search", fmt.Sprintf("MusicBrainz found artwork via Cover Art Archive: %s", posterURL))
-
-		// Validate the image URL before caching and returning
-		// Note: Cover Art Archive redirects, so a simple HEAD request might not be enough.
-		// We'll rely on Discord's ability to follow redirects for now.
-		// If this still causes issues, we might need a more robust validation here.
+		if ctx.Err() != nil {
+			return ""
+		}
+		logInfo("MusicBrainz", fmt.Sprintf("Found artwork in %v: %s", duration, mbid))
 
 		musicbrainzSearchCache.Lock()
-		musicbrainzSearchCache.m[cacheKey] = posterURL
+		musicbrainzSearchCache.m[cacheKey] = struct {
+			Value     string
+			Timestamp time.Time
+		}{Value: posterURL, Timestamp: time.Now()}
 		musicbrainzSearchCache.Unlock()
 		return posterURL
 	}
 
-	// If no release found, try searching for recordings (tracks) - less likely to have direct cover art
-	// This part is commented out for now to avoid potentially irrelevant results,
-	// as track-level cover art is rare and often just links to the album.
-	// If needed, this can be re-enabled with logic to find the associated release MBID.
-
-	logInfo("MusicBrainz Search", fmt.Sprintf("MusicBrainz search found no artwork for query: %s", query))
+	if ctx.Err() != nil {
+		return ""
+	}
+	logInfo("MusicBrainz", fmt.Sprintf("No artwork found in %v for query: %s", duration, query))
+	musicbrainzSearchCache.Lock()
+	musicbrainzSearchCache.m[cacheKey] = struct {
+		Value     string
+		Timestamp time.Time
+	}{Value: "", Timestamp: time.Now()}
+	musicbrainzSearchCache.Unlock()
 	return ""
 }
 
-// MusicBrainz API has a rate limit of 1 request per second.
-// We should ensure our calls respect this. The httpClient's timeout helps,
-// but explicit rate limiting might be needed if many requests are made in quick succession.
-// For now, with caching, this should be sufficient.
-var _ = time.Second // Placeholder to avoid unused import warning if not used elsewhere
+var _ = time.Second

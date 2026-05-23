@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
-// isItemAnime checks if a Jellyfin item is tagged as anime using the configured tags.
 func isItemAnime(item JellyfinSession, cfg Config) bool {
 	for _, tag := range item.NowPlayingItem.Tags {
 		lowerTag := strings.ToLower(tag)
@@ -22,8 +22,6 @@ func isItemAnime(item JellyfinSession, cfg Config) bool {
 
 func getJellyfinArtwork(jellyfinURL, token, itemID string) string {
 	fullUrl := fmt.Sprintf("%s/Items/%s/Images/Primary?api_key=%s", jellyfinURL, itemID, token)
-	// If Jellyfin is on a local IP, Discord won't be able to display it.
-	// We still return the local URL, but the main logic will try external providers first.
 	if strings.Contains(jellyfinURL, "10.") || strings.Contains(jellyfinURL, "192.168.") || strings.Contains(jellyfinURL, "127.0.0.1") || strings.Contains(jellyfinURL, "localhost") {
 		logWarn("Jellyfin Artwork", "Jellyfin is on a local IP. Images might not show in Discord without a public URL.")
 	}
@@ -32,30 +30,34 @@ func getJellyfinArtwork(jellyfinURL, token, itemID string) string {
 	return proxiedUrl
 }
 
-// isValidImageURL performs a HEAD request to check if the URL returns a valid image.
 func isValidImageURL(imageURL string) bool {
 	if imageURL == "" {
 		return false
 	}
-	// Use GET instead of HEAD as some proxies/servers handle HEAD poorly
-	req, err := http.NewRequest("GET", imageURL, nil)
+	start := time.Now()
+	req, err := http.NewRequest("HEAD", imageURL, nil)
 	if err != nil {
-		logWarn("Image Validation", fmt.Sprintf("Failed to create GET request for %s: %v", imageURL, err))
+		logWarn("Validation", fmt.Sprintf("Failed to create HEAD request for %s: %v", imageURL, err))
 		return false
 	}
 	req.Header.Set("User-Agent", ClientName+"/"+ClientVersion)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		logWarn("Image Validation", fmt.Sprintf("GET request failed for %s: %v", imageURL, err))
+		logWarn("Validation", fmt.Sprintf("HEAD request failed for %s: %v", imageURL, err))
 		return false
 	}
 	defer resp.Body.Close()
 
+	duration := time.Since(start).Truncate(time.Millisecond)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		contentType := resp.Header.Get("Content-Type")
-		return strings.HasPrefix(contentType, "image/")
+		valid := strings.HasPrefix(contentType, "image/")
+		if !valid {
+			logWarn("Validation", fmt.Sprintf("URL %s in %v is not an image: %s", imageURL, duration, contentType))
+		}
+		return valid
 	}
-	logWarn("Image Validation", fmt.Sprintf("Image URL %s returned status code %d", imageURL, resp.StatusCode))
+	logWarn("Validation", fmt.Sprintf("URL %s returned status %d in %v", imageURL, resp.StatusCode, duration))
 	return false
 }
 

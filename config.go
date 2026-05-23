@@ -42,7 +42,7 @@ func loadConfig(path string) (Config, error) {
 		cfg.GenericItemText = "on Jellyfin"
 	}
 	if len(cfg.AnimeTags) == 0 {
-		cfg.AnimeTags = []string{"anime", "japanese animation", "animation", "manga"} // Default common tags for anime
+		cfg.AnimeTags = []string{"anime", "japanese animation", "animation", "manga"}
 	}
 	return cfg, nil
 }

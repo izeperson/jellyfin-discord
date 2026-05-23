@@ -21,6 +21,6 @@ type JellyfinSession struct {
 		AlbumId           string            `json:"AlbumId"`
 		Album             string            `json:"Album"`
 		ProviderIds       map[string]string `json:"ProviderIds"`
-		Tags              []string          `json:"Tags"` // Added to support anime detection
+		Tags              []string          `json:"Tags"`
 	} `json:"NowPlayingItem"`
 }
