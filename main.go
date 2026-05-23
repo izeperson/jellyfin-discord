@@ -171,10 +171,20 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				// 2. Fallback to TMDB if AniList is not enabled/didn't find anything, or if not anime
 				if poster == "" {
 					if cfg.TMDBAPIKey != "" {
-						logInfo("Image Fetch", fmt.Sprintf("Attempting TMDB search for: %s", searchTitle))
-						poster, tmdbID = searchTMDB(cfg.TMDBAPIKey, searchTitle, prodYear, targetItem.NowPlayingItem.Type)
-						if poster != "" {
-							logInfo("Image Fetch", fmt.Sprintf("TMDB search successful, poster found: %s", poster))
+						// Try lookup by ID first if available (mostly for Movies)
+						if tid, ok := targetItem.NowPlayingItem.ProviderIds["Tmdb"]; ok && tid != "" && (targetItem.NowPlayingItem.Type == "Movie" || targetItem.NowPlayingItem.Type == "Series") {
+							poster = getTMDBPosterByID(cfg.TMDBAPIKey, tid, targetItem.NowPlayingItem.Type)
+							if poster != "" {
+								fmt.Sscanf(tid, "%d", &tmdbID)
+							}
+						}
+
+						if poster == "" {
+							logInfo("Image Fetch", fmt.Sprintf("Attempting TMDB search for: %s", searchTitle))
+							poster, tmdbID = searchTMDB(cfg.TMDBAPIKey, searchTitle, prodYear, targetItem.NowPlayingItem.Type)
+							if poster != "" {
+								logInfo("Image Fetch", fmt.Sprintf("TMDB search successful, poster found: %s", poster))
+							}
 						}
 					} else {
 						logWarn("Image Fetch", "TMDB API Key is missing in config.json. TMDB images will not be fetched.")

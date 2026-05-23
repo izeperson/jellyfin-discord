@@ -6,6 +6,58 @@ import (
 	"net/url"
 )
 
+func getTMDBPosterByID(apiKey string, tmdbID string, itemType string) string {
+	if apiKey == "" || tmdbID == "" {
+		return ""
+	}
+
+	cacheKey := fmt.Sprintf("ID|%s|%s", itemType, tmdbID)
+	tmdbSearchCache.RLock()
+	if cached, ok := tmdbSearchCache.m[cacheKey]; ok {
+		tmdbSearchCache.RUnlock()
+		return cached.PosterURL
+	}
+	tmdbSearchCache.RUnlock()
+
+	category := "movie"
+	if itemType == "Series" || itemType == "Episode" {
+		category = "tv"
+	}
+
+	logInfo("TMDB Lookup", fmt.Sprintf("Fetching poster for TMDB ID: %s (%s)", tmdbID, category))
+	apiURL := fmt.Sprintf("https://api.themoviedb.org/3/%s/%s?api_key=%s", category, tmdbID, apiKey)
+	resp, err := httpClient.Get(apiURL)
+	if err != nil || resp.StatusCode != 200 {
+		logWarn("TMDB Lookup", fmt.Sprintf("TMDB ID lookup failed for %s: %v", tmdbID, err))
+		return ""
+	}
+	defer resp.Body.Close()
+
+	var res struct {
+		PosterPath string `json:"poster_path"`
+		ID         int    `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return ""
+	}
+
+	if res.PosterPath != "" {
+		rawURL := "https://image.tmdb.org/t/p/w500" + res.PosterPath
+		posterURL := fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512", url.QueryEscape(rawURL))
+
+		tmdbSearchCache.Lock()
+		tmdbSearchCache.m[cacheKey] = struct {
+			PosterURL string
+			TMDBID    int
+		}{PosterURL: posterURL, TMDBID: res.ID}
+		tmdbSearchCache.Unlock()
+
+		return posterURL
+	}
+
+	return ""
+}
+
 func searchTMDB(apiKey string, query string, year string, itemType string) (posterURL string, tmdbID int) {
 	cacheKey := fmt.Sprintf("%s|%s|%s", itemType, query, year)
 	if year == "" || year == "0" {
