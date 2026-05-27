@@ -22,6 +22,12 @@ type Activity struct {
 	Assets     Assets     `json:"assets,omitempty"`
 	Timestamps Timestamps `json:"timestamps,omitempty"`
 	Type       int        `json:"type,omitempty"`
+	Buttons    []Button   `json:"buttons,omitempty"`
+}
+
+type Button struct {
+	Label string `json:"label"`
+	Url   string `json:"url"`
 }
 
 type Assets struct {

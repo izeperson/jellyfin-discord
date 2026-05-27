@@ -61,11 +61,13 @@ var anilistSearchCache = struct {
 	m map[string]struct {
 		PosterURL string
 		Score     string
+		SiteURL   string
 		Timestamp time.Time
 	}
 }{m: make(map[string]struct {
 	PosterURL string
 	Score     string
+	SiteURL   string
 	Timestamp time.Time
 })}
 
@@ -91,7 +93,7 @@ var jellyfinArtworkCache = struct {
 	Timestamp time.Time
 })}
 
-func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, lastItemID *string, lastPlayState *bool, lastPosTicks *float64, lastUpdateTime *time.Time, lastPoster *string, lastRatings *string, lastTMDBID *int, lastBuffering *bool) {
+func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, lastItemID *string, lastPlayState *bool, lastPosTicks *float64, lastUpdateTime *time.Time, lastPoster *string, lastRatings *string, lastTMDBID *int, lastAniListURL *string, lastBuffering *bool) {
 	var lineOne, lineTwo, searchTitle, currentID, prodYear string
 	var posTicks, runTimeTicks float64
 	isPaused := false
@@ -140,6 +142,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 					*lastPosTicks = 0
 					*lastBuffering = isBuffering
 					*lastUpdateTime = now
+					*lastAniListURL = ""
 					*lastPlayState = isPaused
 					logInfo("Playback paused (Status hidden):", lineOne)
 				} else {
@@ -151,6 +154,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				var poster string
 				var tmdbID int
 				var ratings string
+				var aniListURL string
 				isAnime := isItemAnime(*targetItem, cfg)
 
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -232,6 +236,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 					type videoResult struct {
 						idx    int
 						poster string
+						url    string
 						id     int
 					}
 					resultsChan := make(chan videoResult, 3)
@@ -241,8 +246,8 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 						wg.Add(1)
 						go func() {
 							defer wg.Done()
-							p, _ := searchAniList(ctx, searchTitle)
-							resultsChan <- videoResult{idx: 0, poster: p}
+							p, _, u := searchAniList(ctx, searchTitle)
+							resultsChan <- videoResult{idx: 0, poster: p, url: u}
 						}()
 					}
 
@@ -295,6 +300,9 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 						if res, ok := videoResults[i]; ok {
 							if tmdbID == 0 {
 								tmdbID = res.id
+							}
+							if aniListURL == "" && res.url != "" {
+								aniListURL = res.url
 							}
 							if poster == "" && res.poster != "" {
 								poster = res.poster
@@ -367,11 +375,37 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				*lastPoster = poster
 				*lastRatings = ratings
 				*lastTMDBID = tmdbID
+				*lastAniListURL = aniListURL
 			}
 
 			activity := Activity{
 				Assets: Assets{LargeImage: *lastPoster},
 				Type:   3,
+			}
+
+			if cfg.EnableButtons {
+				if cfg.PublicJellyfinURL != "" {
+					jellyfinLink := fmt.Sprintf("%s/web/index.html#!/details?id=%s", cfg.PublicJellyfinURL, currentID)
+					activity.Buttons = append(activity.Buttons, Button{Label: "View on Jellyfin", Url: jellyfinLink})
+				}
+
+				if !isAudio {
+					isAnime := isItemAnime(*targetItem, cfg)
+					if isAnime && *lastAniListURL != "" {
+						if len(activity.Buttons) < 2 {
+							activity.Buttons = append(activity.Buttons, Button{Label: "View on AniList", Url: *lastAniListURL})
+						}
+					} else if *lastTMDBID != 0 {
+						tmdbType := "movie"
+						if targetItem.NowPlayingItem.Type == "Series" || targetItem.NowPlayingItem.Type == "Episode" {
+							tmdbType = "tv"
+						}
+						tmdbLink := fmt.Sprintf("https://www.themoviedb.org/%s/%d", tmdbType, *lastTMDBID)
+						if len(activity.Buttons) < 2 {
+							activity.Buttons = append(activity.Buttons, Button{Label: "View on TMDB", Url: tmdbLink})
+						}
+					}
+				}
 			}
 
 			if isAudio {
@@ -423,6 +457,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 			*lastPoster = ""
 			*lastRatings = ""
 			*lastTMDBID = 0
+			*lastAniListURL = ""
 			*lastBuffering = false
 		} else {
 			logWarn("Failed to clear Discord activity (stopped):", err.Error())
@@ -433,6 +468,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 		*lastPoster = ""
 		*lastRatings = ""
 		*lastTMDBID = 0
+		*lastAniListURL = ""
 		*lastBuffering = false
 	}
 }
@@ -549,6 +585,7 @@ func main() {
 	var lastPoster string
 	var lastRatings string
 	var lastTMDBID int
+	var lastAniListURL string
 	lastUpdateTime := time.Now()
 
 	for {
@@ -617,7 +654,7 @@ func main() {
 			continue
 		}
 
-		updateActivity(drpc, cfg, sessions, &lastItemID, &lastPlayState, &lastPosTicks, &lastUpdateTime, &lastPoster, &lastRatings, &lastTMDBID, &lastBuffering)
+		updateActivity(drpc, cfg, sessions, &lastItemID, &lastPlayState, &lastPosTicks, &lastUpdateTime, &lastPoster, &lastRatings, &lastTMDBID, &lastAniListURL, &lastBuffering)
 		time.Sleep(time.Duration(cfg.PollInterval) * time.Second)
 	}
 }

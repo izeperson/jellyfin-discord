@@ -20,6 +20,8 @@ type Config struct {
 	GenericItemText   string   `json:"generic_item_text"`
 	AnimeTags         []string `json:"anime_tags"`
 	AnilistEnabled    bool     `json:"anilist_enabled"`
+	EnableButtons     bool     `json:"enable_buttons"`
+	PublicJellyfinURL string   `json:"public_jellyfin_url"`
 }
 
 func loadConfig(path string) (Config, error) {

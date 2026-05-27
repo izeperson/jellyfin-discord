@@ -10,5 +10,7 @@
   "episode_thumbnails": false,
   "fallback_artwork": false,
   "anilist_enabled": true,
-  "anime_tags": ["anime", "japanese animation", "animation", "manga", "otaku"]
+  "anime_tags": ["anime", "japanese animation", "animation", "manga", "otaku"],
+  "enable_buttons": false,
+  "public_jellyfin_url": "https://jellyfin.example.com"
 }
