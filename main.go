@@ -107,6 +107,9 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 
 	for _, item := range sessions {
 		if item.UserName == cfg.TargetUser {
+			if item.NowPlayingItem.Type == "Audio" && cfg.DisableMusic {
+				continue
+			}
 			targetItem = &item
 			isPaused = item.PlayState.IsPaused
 			posTicks = item.PlayState.PositionTicks

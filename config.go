@@ -22,6 +22,7 @@ type Config struct {
 	AnilistEnabled    bool     `json:"anilist_enabled"`
 	EnableButtons     bool     `json:"enable_buttons"`
 	PublicJellyfinURL string   `json:"public_jellyfin_url"`
+	DisableMusic      bool     `json:"disable_music"`
 }
 
 func loadConfig(path string) (Config, error) {
