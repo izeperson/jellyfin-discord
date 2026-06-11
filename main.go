@@ -184,6 +184,12 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 						}
 					}
 
+					if artistName != "" && lineOne != "" {
+						addReq(func(c context.Context, q string, a string) string {
+							return searchLastFM(c, "", a, q)
+						}, lineOne, "lastfm:")
+					}
+
 					if artistName != "" && albumName != "" {
 						addReq(searchiTunes, artistName+" "+albumName, "itunes:")
 					}
@@ -382,8 +388,11 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 			}
 
 			activity := Activity{
-				Assets: Assets{LargeImage: *lastPoster},
-				Type:   3,
+				Assets: Assets{
+					LargeImage: *lastPoster,
+					LargeText:  lineOne,
+				},
+				Type: 3,
 			}
 
 			if cfg.EnableButtons {
@@ -428,6 +437,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 					activity.State = statePrefix
 				}
 				activity.Assets.SmallImage = "https://images.weserv.nl/?url=" + url.QueryEscape(PauseIconURL) + "&w=64&h=64&inv"
+				activity.Assets.SmallText = statePrefix
 				logInfo("Status", statePrefix+": "+lineOne)
 			} else {
 				activity.Details = lineOne
@@ -529,6 +539,14 @@ func startCacheCleanup() {
 				}
 			}
 			musicbrainzSearchCache.Unlock()
+
+			lastfmSearchCache.Lock()
+			for k, v := range lastfmSearchCache.m {
+				if time.Since(v.Timestamp) > CacheTTL {
+					delete(lastfmSearchCache.m, k)
+				}
+			}
+			lastfmSearchCache.Unlock()
 
 			jellyfinArtworkCache.Lock()
 			for k, v := range jellyfinArtworkCache.m {
