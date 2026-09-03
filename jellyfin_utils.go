@@ -1,12 +1,38 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
+
+func getJellyfinItem(ctx context.Context, jellyfinURL, token, userID, itemID string) (JellyfinItem, error) {
+	var item JellyfinItem
+	requestURL := fmt.Sprintf("%s/Items/%s?userId=%s", strings.TrimRight(jellyfinURL, "/"), url.PathEscape(itemID), url.QueryEscape(userID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return item, err
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		ClientName, DeviceName, ClientName, ClientVersion, token))
+	req.Header.Set("User-Agent", ClientName+"/"+ClientVersion)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return item, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return item, fmt.Errorf("Jellyfin item request returned %s", resp.Status)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&item); err != nil {
+		return item, err
+	}
+	return item, nil
+}
 
 func isItemAnime(item JellyfinSession, cfg Config) bool {
 	for _, tag := range item.NowPlayingItem.Tags {
@@ -24,10 +50,12 @@ func getJellyfinArtwork(jellyfinURL, token, itemID string) string {
 	fullUrl := fmt.Sprintf("%s/Items/%s/Images/Primary?api_key=%s", jellyfinURL, itemID, token)
 	if strings.Contains(jellyfinURL, "10.") || strings.Contains(jellyfinURL, "192.168.") || strings.Contains(jellyfinURL, "127.0.0.1") || strings.Contains(jellyfinURL, "localhost") {
 		logWarn("Jellyfin Artwork", "Jellyfin is on a local IP. Images might not show in Discord without a public URL.")
+		proxiedUrl := fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512&h=512&fit=cover&a=c", url.QueryEscape(fullUrl))
+		logInfo("Jellyfin Artwork", fmt.Sprintf("Returning Jellyfin artwork URL (proxied): %s", proxiedUrl))
+		return proxiedUrl
 	}
-	proxiedUrl := fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512&h=512&fit=cover&a=c", url.QueryEscape(fullUrl))
-	logInfo("Jellyfin Artwork", fmt.Sprintf("Returning Jellyfin artwork URL (proxied): %s", proxiedUrl))
-	return proxiedUrl
+	logInfo("Jellyfin Artwork", fmt.Sprintf("Returning direct Jellyfin artwork URL: %s", fullUrl))
+	return fullUrl
 }
 
 func isValidImageURL(imageURL string) bool {
@@ -61,24 +89,26 @@ func isValidImageURL(imageURL string) bool {
 	return false
 }
 
+func isMusicItem(item JellyfinSession) bool {
+	return item.NowPlayingItem.Type == "Audio" ||
+		item.NowPlayingItem.Type == "MusicVideo" ||
+		len(item.NowPlayingItem.Artists) > 0 ||
+		item.NowPlayingItem.AlbumArtist != ""
+}
+
+func getMusicArtist(item JellyfinSession) string {
+	if len(item.NowPlayingItem.Artists) > 0 {
+		return item.NowPlayingItem.Artists[0]
+	}
+	return item.NowPlayingItem.AlbumArtist
+}
+
 func getMediaDetails(item JellyfinSession, genericText string) (lineOne, lineTwo, searchTitle, prodYear string, sNum, eNum float64) {
 	if item.NowPlayingItem.ProductionYear > 0 {
 		prodYear = fmt.Sprintf("%.0f", item.NowPlayingItem.ProductionYear)
 	}
-	switch item.NowPlayingItem.Type {
-	case "Episode":
-		seriesName := item.NowPlayingItem.SeriesName
-		epName := item.NowPlayingItem.Name
-		sNum = item.NowPlayingItem.ParentIndexNumber
-		eNum = item.NowPlayingItem.IndexNumber
-		lineOne = seriesName
-		lineTwo = fmt.Sprintf("S%.0f - E%.0f: %s", sNum, eNum, epName)
-		searchTitle = seriesName
-	case "Audio":
-		artistName := ""
-		if len(item.NowPlayingItem.Artists) > 0 {
-			artistName = item.NowPlayingItem.Artists[0]
-		}
+	if isMusicItem(item) {
+		artistName := getMusicArtist(item)
 		album := item.NowPlayingItem.Album
 		track := item.NowPlayingItem.Name
 		lineOne = track
@@ -94,10 +124,25 @@ func getMediaDetails(item JellyfinSession, genericText string) (lineOne, lineTwo
 		} else {
 			searchTitle = track
 		}
+		return
+	}
+
+	switch item.NowPlayingItem.Type {
+	case "Episode":
+		seriesName := item.NowPlayingItem.SeriesName
+		epName := item.NowPlayingItem.Name
+		sNum = item.NowPlayingItem.ParentIndexNumber
+		eNum = item.NowPlayingItem.IndexNumber
+		lineOne = seriesName
+		lineTwo = fmt.Sprintf("S%.0f - E%.0f: %s", sNum, eNum, epName)
+		searchTitle = seriesName
 	default:
 		lineOne = item.NowPlayingItem.Name
+		if prodYear != "" {
+			lineOne = fmt.Sprintf("%s (%s)", lineOne, prodYear)
+		}
 		lineTwo = genericText
-		searchTitle = lineOne
+		searchTitle = item.NowPlayingItem.Name
 	}
 	return
 }

@@ -1,0 +1,116 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - development
+    tags:
+      - "v*"
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - development
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/development' || startsWith(github.ref, 'refs/tags/v')))
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            goos: linux
+            goarch: amd64
+            extension: ""
+          - name: windows-amd64
+            goos: windows
+            goarch: amd64
+            extension: .exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o "dist/jellyfin-discord-${{ matrix.name }}${{ matrix.extension }}" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jellyfin-discord-${{ matrix.name }}
+          path: dist/jellyfin-discord-${{ matrix.name }}${{ matrix.extension }}
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Package artifacts
+        working-directory: dist
+        run: |
+          tar -czf jellyfin-discord-linux-amd64.tar.gz jellyfin-discord-linux-amd64
+          zip jellyfin-discord-windows-amd64.zip jellyfin-discord-windows-amd64.exe
+          rm jellyfin-discord-linux-amd64 jellyfin-discord-windows-amd64.exe
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="ci-${GITHUB_SHA::10}"
+          fi
+          gh release create "$version" dist/* --target "$GITHUB_SHA" --generate-notes --title "$version"
