@@ -107,7 +107,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 
 	for _, item := range sessions {
 		if item.UserName == cfg.TargetUser {
-			if item.NowPlayingItem.Type == "Audio" && cfg.DisableMusic {
+			if isMusicItem(item) && cfg.DisableMusic {
 				continue
 			}
 			targetItem = &item
@@ -115,9 +115,22 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 			posTicks = item.PlayState.PositionTicks
 			currentID = item.NowPlayingItem.Id
 			runTimeTicks = item.NowPlayingItem.RunTimeTicks
-			isAudio = item.NowPlayingItem.Type == "Audio"
+			isAudio = isMusicItem(item)
 			lineOne, lineTwo, searchTitle, prodYear, sNum, eNum = getMediaDetails(item, cfg.GenericItemText)
 			break
+		}
+	}
+	if targetItem != nil && (currentID != *lastItemID || *lastPoster == "") {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		fullItem, err := getJellyfinItem(ctx, cfg.JellyfinURL, cfg.JellyfinToken, targetItem.UserId, currentID)
+		cancel()
+		if err != nil {
+			logWarn("Jellyfin item metadata request failed", err.Error())
+		} else {
+			targetItem.NowPlayingItem = fullItem
+			lineOne, lineTwo, searchTitle, prodYear, sNum, eNum = getMediaDetails(*targetItem, cfg.GenericItemText)
+			isAudio = isMusicItem(*targetItem)
+			logInfo("Jellyfin item", fmt.Sprintf("Type=%s, Artists=%v, AlbumArtist=%s, ProviderIds=%v", fullItem.Type, fullItem.Artists, fullItem.AlbumArtist, fullItem.ProviderIds))
 		}
 	}
 
@@ -153,7 +166,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				}
 			}
 		} else if currentID != *lastItemID || isPaused != *lastPlayState || skipped || isBuffering != *lastBuffering {
-			if currentID != *lastItemID {
+			if currentID != *lastItemID || *lastPoster == "" {
 				var poster string
 				var tmdbID int
 				var ratings string
@@ -163,11 +176,20 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
 
-				if isAudio {
-					artistName := ""
-					if len(targetItem.NowPlayingItem.Artists) > 0 {
-						artistName = targetItem.NowPlayingItem.Artists[0]
+				if cfg.FallbackArtwork {
+					artworkBaseURL := cfg.JellyfinURL
+					if cfg.PublicJellyfinURL != "" {
+						artworkBaseURL = cfg.PublicJellyfinURL
 					}
+					jellyfinURL := getJellyfinArtwork(artworkBaseURL, cfg.JellyfinToken, currentID)
+					if isValidImageURL(jellyfinURL) {
+						poster = jellyfinURL
+						logInfo("Search", fmt.Sprintf("Using Jellyfin artwork: %s", poster))
+					}
+				}
+
+				if poster == "" && isAudio {
+					artistName := getMusicArtist(*targetItem)
 					albumName := targetItem.NowPlayingItem.Album
 
 					type searchReq struct {
@@ -241,7 +263,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 							break
 						}
 					}
-				} else {
+				} else if poster == "" {
 					type videoResult struct {
 						idx    int
 						poster string
@@ -349,7 +371,11 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 					} else {
 						jellyfinArtworkCache.RUnlock()
 						logInfo("Search", "External providers failed, falling back to Jellyfin artwork.")
-						jellyfinFallbackURL := getJellyfinArtwork(cfg.JellyfinURL, cfg.JellyfinToken, imageID)
+						artworkBaseURL := cfg.JellyfinURL
+						if cfg.PublicJellyfinURL != "" {
+							artworkBaseURL = cfg.PublicJellyfinURL
+						}
+						jellyfinFallbackURL := getJellyfinArtwork(artworkBaseURL, cfg.JellyfinToken, imageID)
 						if isValidImageURL(jellyfinFallbackURL) {
 							poster = jellyfinFallbackURL
 							logInfo("Search", fmt.Sprintf("Jellyfin artwork fallback successful: %s", poster))
@@ -374,7 +400,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				}
 
 				if poster == "" {
-					if poster != "" {
+					if PlaceholderImageURL != "" {
 						logWarn("Search", fmt.Sprintf("No image found for: %s. Using placeholder.", lineOne))
 					} else {
 						logWarn("Search", fmt.Sprintf("No image found for: %s. Using Discord default.", lineOne))
