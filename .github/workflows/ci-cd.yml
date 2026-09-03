@@ -102,7 +102,7 @@ jobs:
         run: |
           tar -czf jellyfin-discord-linux-amd64.tar.gz jellyfin-discord-linux-amd64
           zip jellyfin-discord-windows-amd64.zip jellyfin-discord-windows-amd64.exe
-          rm jellyfin-discord-linux-amd64 jellyfin-discord-windows-amd64.exe
+          rm jellyfin-discord-windows-amd64.exe
 
       - name: Create GitHub Release
         env:
