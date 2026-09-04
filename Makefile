@@ -3,7 +3,7 @@ GOBUILD=$(GOCMD) build
 GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
-BINARY_NAME=jellyfin-rpc
+BINARY_NAME=jellyfin-discord
 BINARY_UNIX=$(BINARY_NAME)
 BINARY_WIN=$(BINARY_NAME).exe
 
