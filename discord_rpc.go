@@ -111,5 +111,9 @@ func (d *DiscordRPC) Close() {
 func connectDiscord(appID string) (*DiscordRPC, error) {
 	drpc := &DiscordRPC{appID: appID}
 	err := drpc.Connect()
+	if err != nil {
+		drpc.Close()
+		return nil, err
+	}
 	return drpc, err
 }

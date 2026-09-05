@@ -51,10 +51,10 @@ func getJellyfinArtwork(jellyfinURL, token, itemID string) string {
 	if strings.Contains(jellyfinURL, "10.") || strings.Contains(jellyfinURL, "192.168.") || strings.Contains(jellyfinURL, "127.0.0.1") || strings.Contains(jellyfinURL, "localhost") {
 		logWarn("Jellyfin Artwork", "Jellyfin is on a local IP. Images might not show in Discord without a public URL.")
 		proxiedUrl := fmt.Sprintf("https://images.weserv.nl/?url=%s&w=512&h=512&fit=cover&a=c", url.QueryEscape(fullUrl))
-		logInfo("Jellyfin Artwork", fmt.Sprintf("Returning Jellyfin artwork URL (proxied): %s", proxiedUrl))
+		logInfo("Jellyfin Artwork", fmt.Sprintf("Returning proxied Jellyfin artwork URL for item %s", itemID))
 		return proxiedUrl
 	}
-	logInfo("Jellyfin Artwork", fmt.Sprintf("Returning direct Jellyfin artwork URL: %s", fullUrl))
+	logInfo("Jellyfin Artwork", fmt.Sprintf("Returning direct Jellyfin artwork URL for item %s", itemID))
 	return fullUrl
 }
 
@@ -70,23 +70,39 @@ func isValidImageURL(imageURL string) bool {
 	}
 	req.Header.Set("User-Agent", ClientName+"/"+ClientVersion)
 	resp, err := httpClient.Do(req)
+	if err == nil {
+		valid := isImageResponse(resp)
+		resp.Body.Close()
+		if valid {
+			return true
+		}
+	}
+
+	// Some reverse proxies reject HEAD but serve the same URL with GET.
+	getReq, err := http.NewRequest("GET", imageURL, nil)
 	if err != nil {
-		logWarn("Validation", fmt.Sprintf("HEAD request failed for %s: %v", imageURL, err))
+		logWarn("Validation", fmt.Sprintf("Failed to create GET request for %s: %v", imageURL, err))
 		return false
 	}
-	defer resp.Body.Close()
+	getReq.Header.Set("User-Agent", ClientName+"/"+ClientVersion)
+	getReq.Header.Set("Range", "bytes=0-0")
+	getResp, err := httpClient.Do(getReq)
+	if err != nil {
+		logWarn("Validation", fmt.Sprintf("GET request failed for %s: %v", imageURL, err))
+		return false
+	}
+	defer getResp.Body.Close()
+	if isImageResponse(getResp) {
+		return true
+	}
 
 	duration := time.Since(start).Truncate(time.Millisecond)
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		contentType := resp.Header.Get("Content-Type")
-		valid := strings.HasPrefix(contentType, "image/")
-		if !valid {
-			logWarn("Validation", fmt.Sprintf("URL %s in %v is not an image: %s", imageURL, duration, contentType))
-		}
-		return valid
-	}
-	logWarn("Validation", fmt.Sprintf("URL %s returned status %d in %v", imageURL, resp.StatusCode, duration))
+	logWarn("Validation", fmt.Sprintf("URL %s returned status %d with content type %q in %v", imageURL, getResp.StatusCode, getResp.Header.Get("Content-Type"), duration))
 	return false
+}
+
+func isImageResponse(resp *http.Response) bool {
+	return resp.StatusCode >= 200 && resp.StatusCode < 300 && strings.HasPrefix(resp.Header.Get("Content-Type"), "image/")
 }
 
 func isMusicItem(item JellyfinSession) bool {
@@ -117,7 +133,7 @@ func getMediaDetails(item JellyfinSession, genericText string) (lineOne, lineTwo
 		} else if artistName != "" {
 			lineTwo = artistName
 		} else {
-			lineTwo = "on Jellyfin"
+			lineTwo = DefaultGenericItemText
 		}
 		if artistName != "" {
 			searchTitle = fmt.Sprintf("%s - %s", artistName, track)

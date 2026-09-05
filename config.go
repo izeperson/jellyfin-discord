@@ -6,6 +6,13 @@ import (
 	"os"
 )
 
+const (
+	DefaultPollInterval    = 3
+	DefaultGenericItemText = "on Jellyfin"
+)
+
+var defaultAnimeTags = []string{"anime", "japanese animation", "animation", "manga"}
+
 type Config struct {
 	JellyfinURL       string   `json:"jellyfin_url"`
 	JellyfinToken     string   `json:"jellyfin_token"`
@@ -39,13 +46,13 @@ func loadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("missing required configuration fields")
 	}
 	if cfg.PollInterval <= 0 {
-		cfg.PollInterval = 3
+		cfg.PollInterval = DefaultPollInterval
 	}
 	if cfg.GenericItemText == "" {
-		cfg.GenericItemText = "on Jellyfin"
+		cfg.GenericItemText = DefaultGenericItemText
 	}
 	if len(cfg.AnimeTags) == 0 {
-		cfg.AnimeTags = []string{"anime", "japanese animation", "animation", "manga"}
+		cfg.AnimeTags = append([]string(nil), defaultAnimeTags...)
 	}
 	return cfg, nil
 }
