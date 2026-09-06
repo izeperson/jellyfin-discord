@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -31,6 +32,30 @@ type Config struct {
 	EnableButtons     bool     `json:"enable_buttons"`
 	PublicJellyfinURL string   `json:"public_jellyfin_url"`
 	DisableMusic      bool     `json:"disable_music"`
+}
+
+func missingConfigFields(cfg Config) []string {
+	missing := make([]string, 0, 4)
+	if cfg.JellyfinURL == "" {
+		missing = append(missing, "jellyfin_url")
+	}
+	if cfg.JellyfinToken == "" {
+		missing = append(missing, "jellyfin_token")
+	}
+	if cfg.DiscordAppID == "" {
+		missing = append(missing, "discord_app_id")
+	}
+	if cfg.TargetUser == "" {
+		missing = append(missing, "target_user")
+	}
+	return missing
+}
+
+func formatMissingConfigFields(path string, missing []string) error {
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("missing required configuration fields in %q: %s", path, joinQuoted(missing))
 }
 
 func writeConfigTemplate(path string) error {
@@ -82,8 +107,8 @@ func loadConfig(path string) (Config, error) {
 	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parsing config: %w", err)
 	}
-	if cfg.JellyfinURL == "" || cfg.JellyfinToken == "" || cfg.DiscordAppID == "" || cfg.TargetUser == "" {
-		return Config{}, fmt.Errorf("missing required configuration fields; check %q for jellyfin_url, jellyfin_token, discord_app_id, and target_user", path)
+	if missing := missingConfigFields(cfg); len(missing) > 0 {
+		return Config{}, formatMissingConfigFields(path, missing)
 	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = DefaultPollInterval
@@ -95,4 +120,24 @@ func loadConfig(path string) (Config, error) {
 		cfg.AnimeTags = append([]string(nil), defaultAnimeTags...)
 	}
 	return cfg, nil
+}
+
+func joinQuoted(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, fmt.Sprintf("%q", value))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

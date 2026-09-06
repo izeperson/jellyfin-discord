@@ -25,6 +25,20 @@ func TestWriteConfigTemplateCreatesFile(t *testing.T) {
 	}
 }
 
+func TestMissingConfigFieldsAreReportedClearly(t *testing.T) {
+	cfg := Config{}
+	missing := missingConfigFields(cfg)
+	if len(missing) != 4 {
+		t.Fatalf("len(missing) = %d, want 4", len(missing))
+	}
+	if !containsString(missing, "jellyfin_url") {
+		t.Fatalf("missing fields = %v, want jellyfin_url listed", missing)
+	}
+	if !containsString(missing, "jellyfin_token") {
+		t.Fatalf("missing fields = %v, want jellyfin_token listed", missing)
+	}
+}
+
 func TestGetMediaDetailsIncludesProductionYear(t *testing.T) {
 	var item JellyfinSession
 	item.NowPlayingItem.Name = "Example Film"
