@@ -1,6 +1,29 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestWriteConfigTemplateCreatesFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := writeConfigTemplate(path); err != nil {
+		t.Fatalf("writeConfigTemplate() error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "\"jellyfin_url\"") {
+		t.Fatalf("config template missing jellyfin_url: %s", content)
+	}
+	if !strings.Contains(content, "\"discord_app_id\"") {
+		t.Fatalf("config template missing discord_app_id: %s", content)
+	}
+}
 
 func TestGetMediaDetailsIncludesProductionYear(t *testing.T) {
 	var item JellyfinSession

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -596,12 +597,21 @@ func startCacheCleanup() {
 }
 
 func main() {
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [options]\n\n", filepath.Base(os.Args[0]))
+		fmt.Fprintln(flag.CommandLine.Output(), "Options:")
+		flag.PrintDefaults()
+		fmt.Fprintln(flag.CommandLine.Output(), "\nExamples:")
+		fmt.Fprintf(flag.CommandLine.Output(), "  %s\n  %s -config /path/to/config.json\n", filepath.Base(os.Args[0]), filepath.Base(os.Args[0]))
+	}
+
 	configPath := flag.String("config", "config.json", "Path to the configuration file")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		logError("Config error", err.Error())
+		fmt.Fprintf(os.Stderr, "\nTip: edit the generated config file and fill in your Jellyfin URL, token, Discord App ID, and target user before restarting.\n")
 		os.Exit(1)
 	}
 

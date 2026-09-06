@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 const (
@@ -32,9 +33,48 @@ type Config struct {
 	DisableMusic      bool     `json:"disable_music"`
 }
 
+func writeConfigTemplate(path string) error {
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("creating config directory: %w", err)
+		}
+	}
+
+	template := `{
+  "jellyfin_url": "http://localhost:8096",
+  "jellyfin_token": "",
+  "tmdb_api_key": "",
+  "omdb_api_key": "",
+  "discord_app_id": "",
+  "target_user": "",
+  "poll_interval": 3,
+  "show_paused": false,
+  "episode_thumbnails": false,
+  "fallback_artwork": false,
+  "generic_item_text": "on Jellyfin",
+  "anime_tags": ["anime", "japanese animation", "animation", "manga"],
+  "anilist_enabled": true,
+  "enable_buttons": false,
+  "public_jellyfin_url": "",
+  "disable_music": false
+}
+`
+
+	if err := os.WriteFile(path, []byte(template), 0o600); err != nil {
+		return fmt.Errorf("writing config template: %w", err)
+	}
+	return nil
+}
+
 func loadConfig(path string) (Config, error) {
 	file, err := os.Open(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			if writeErr := writeConfigTemplate(path); writeErr != nil {
+				return Config{}, fmt.Errorf("config file missing and template creation failed: %w", writeErr)
+			}
+			return Config{}, fmt.Errorf("config file not found at %q; a template was created there. Fill in the required values and restart", path)
+		}
 		return Config{}, fmt.Errorf("opening config: %w", err)
 	}
 	defer file.Close()
@@ -43,7 +83,7 @@ func loadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parsing config: %w", err)
 	}
 	if cfg.JellyfinURL == "" || cfg.JellyfinToken == "" || cfg.DiscordAppID == "" || cfg.TargetUser == "" {
-		return Config{}, fmt.Errorf("missing required configuration fields")
+		return Config{}, fmt.Errorf("missing required configuration fields; check %q for jellyfin_url, jellyfin_token, discord_app_id, and target_user", path)
 	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = DefaultPollInterval
