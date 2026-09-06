@@ -1,0 +1,15 @@
+# Local configuration and secrets
+config.local.json
+config.*.json
+
+# Build outputs
+jellyfin-discord
+jellyfin-discord.exe
+jellyfin-rpc
+jellyfin-rpc.exe
+dist/
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/

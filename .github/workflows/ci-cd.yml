@@ -102,11 +102,12 @@ jobs:
         run: |
           tar -czf jellyfin-discord-linux-amd64.tar.gz jellyfin-discord-linux-amd64
           zip jellyfin-discord-windows-amd64.zip jellyfin-discord-windows-amd64.exe
-          rm jellyfin-discord-linux-amd64 jellyfin-discord-windows-amd64.exe
+          rm jellyfin-discord-windows-amd64.exe
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             version="${GITHUB_REF_NAME}"

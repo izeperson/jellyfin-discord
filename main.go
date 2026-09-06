@@ -9,7 +9,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -93,7 +95,7 @@ var jellyfinArtworkCache = struct {
 	Timestamp time.Time
 })}
 
-func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, lastItemID *string, lastPlayState *bool, lastPosTicks *float64, lastUpdateTime *time.Time, lastPoster *string, lastRatings *string, lastTMDBID *int, lastAniListURL *string, lastBuffering *bool) {
+func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, lastItemID *string, lastPlayState *bool, lastPosTicks *float64, lastUpdateTime *time.Time, lastPoster *string, lastRatings *string, lastTMDBID *int, lastAniListURL *string, lastBuffering *bool) bool {
 	var lineOne, lineTwo, searchTitle, currentID, prodYear string
 	var posTicks, runTimeTicks float64
 	isPaused := false
@@ -102,7 +104,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 	var targetItem *JellyfinSession
 
 	if drpc == nil {
-		return
+		return false
 	}
 
 	for _, item := range sessions {
@@ -163,6 +165,8 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 					logInfo("Playback paused (Status hidden):", lineOne)
 				} else {
 					logWarn("Failed to clear Discord activity (paused/hidden):", err.Error())
+					drpc.Close()
+					return true
 				}
 			}
 		} else if currentID != *lastItemID || isPaused != *lastPlayState || skipped || isBuffering != *lastBuffering {
@@ -485,6 +489,8 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				*lastItemID, *lastPlayState, *lastPosTicks, *lastUpdateTime, *lastBuffering = currentID, isPaused, posTicks, now, isBuffering
 			} else {
 				logWarn("Failed to update Discord activity:", err.Error())
+				drpc.Close()
+				return true
 			}
 		}
 	} else if currentID == "" && *lastItemID != "" {
@@ -500,6 +506,8 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 			*lastBuffering = false
 		} else {
 			logWarn("Failed to clear Discord activity (stopped):", err.Error())
+			drpc.Close()
+			return true
 		}
 	} else if currentID == "" && *lastItemID == "" {
 		*lastPosTicks = 0
@@ -510,6 +518,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 		*lastAniListURL = ""
 		*lastBuffering = false
 	}
+	return false
 }
 
 func startCacheCleanup() {
@@ -588,12 +597,21 @@ func startCacheCleanup() {
 }
 
 func main() {
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [options]\n\n", filepath.Base(os.Args[0]))
+		fmt.Fprintln(flag.CommandLine.Output(), "Options:")
+		flag.PrintDefaults()
+		fmt.Fprintln(flag.CommandLine.Output(), "\nExamples:")
+		fmt.Fprintf(flag.CommandLine.Output(), "  %s\n  %s -config /path/to/config.json\n", filepath.Base(os.Args[0]), filepath.Base(os.Args[0]))
+	}
+
 	configPath := flag.String("config", "config.json", "Path to the configuration file")
 	flag.Parse()
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		logError("Config error", err.Error())
+		fmt.Fprintf(os.Stderr, "\nTip: edit the generated config file and fill in your Jellyfin URL, token, Discord App ID, and target user before restarting.\n")
 		os.Exit(1)
 	}
 
@@ -604,6 +622,9 @@ func main() {
 	if reloadSig := getReloadSignal(); reloadSig != nil {
 		signal.Notify(sig, reloadSig)
 	}
+	termination := make(chan os.Signal, 1)
+	signal.Notify(termination, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(termination)
 
 	reload := make(chan Config, 1)
 	go func() {
@@ -634,6 +655,19 @@ func main() {
 	var lastTMDBID int
 	var lastAniListURL string
 	lastUpdateTime := time.Now()
+	waitOrStop := func(duration time.Duration) bool {
+		timer := time.NewTimer(duration)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return false
+		case <-termination:
+			if drpc != nil {
+				drpc.Close()
+			}
+			return true
+		}
+	}
 
 	for {
 		select {
@@ -651,6 +685,14 @@ func main() {
 				}
 			}
 			cfg = newCfg
+			lastItemID = ""
+			lastPlayState = false
+			lastPosTicks = 0
+			lastBuffering = false
+			lastPoster = ""
+			lastRatings = ""
+			lastTMDBID = 0
+			lastAniListURL = ""
 			logInfo("Config applied", "")
 		default:
 		}
@@ -667,7 +709,9 @@ func main() {
 		req, err := http.NewRequest("GET", cfg.JellyfinURL+"/Sessions", nil)
 		if err != nil {
 			logError("Failed to create HTTP request for sessions", err.Error())
-			time.Sleep(time.Duration(cfg.PollInterval) * time.Second)
+			if waitOrStop(time.Duration(cfg.PollInterval) * time.Second) {
+				return
+			}
 			continue
 		}
 
@@ -680,14 +724,18 @@ func main() {
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			logWarn("Jellyfin lost, retrying...", err.Error())
-			time.Sleep(time.Duration(cfg.PollInterval) * time.Second)
+			if waitOrStop(time.Duration(cfg.PollInterval) * time.Second) {
+				return
+			}
 			continue
 		}
 
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
 			logWarn("Jellyfin sessions request failed with status", resp.Status)
-			time.Sleep(time.Duration(cfg.PollInterval) * time.Second)
+			if waitOrStop(time.Duration(cfg.PollInterval) * time.Second) {
+				return
+			}
 			continue
 		}
 
@@ -697,11 +745,17 @@ func main() {
 
 		if decodeErr != nil {
 			logWarn("Failed to decode Jellyfin sessions response", decodeErr.Error())
-			time.Sleep(time.Duration(cfg.PollInterval) * time.Second)
+			if waitOrStop(time.Duration(cfg.PollInterval) * time.Second) {
+				return
+			}
 			continue
 		}
 
-		updateActivity(drpc, cfg, sessions, &lastItemID, &lastPlayState, &lastPosTicks, &lastUpdateTime, &lastPoster, &lastRatings, &lastTMDBID, &lastAniListURL, &lastBuffering)
-		time.Sleep(time.Duration(cfg.PollInterval) * time.Second)
+		if updateActivity(drpc, cfg, sessions, &lastItemID, &lastPlayState, &lastPosTicks, &lastUpdateTime, &lastPoster, &lastRatings, &lastTMDBID, &lastAniListURL, &lastBuffering) {
+			drpc = nil
+		}
+		if waitOrStop(time.Duration(cfg.PollInterval) * time.Second) {
+			return
+		}
 	}
 }
