@@ -8,6 +8,7 @@ jellyfin-discord.exe
 jellyfin-rpc
 jellyfin-rpc.exe
 dist/
+.zig-cache/
 
 # OS/editor files
 .DS_Store

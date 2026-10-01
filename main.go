@@ -418,6 +418,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 			}
 
 			activity := Activity{
+				Name: lineOne,
 				Assets: Assets{
 					LargeImage: *lastPoster,
 					LargeText:  lineOne,

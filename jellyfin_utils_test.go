@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,5 +80,22 @@ func TestGetMediaDetailsUsesAlbumArtistForMusic(t *testing.T) {
 	}
 	if searchTitle != "Example Artist - Example Track" {
 		t.Fatalf("searchTitle = %q, want %q", searchTitle, "Example Artist - Example Track")
+	}
+}
+
+func TestDiscordActivityUsesMediaName(t *testing.T) {
+	activity := Activity{
+		Name:    "Example Film",
+		Details: "Example Film",
+		State:   DefaultGenericItemText,
+		Type:    3,
+		Assets:  Assets{LargeText: "Example Film"},
+	}
+	payload, err := json.Marshal(activity)
+	if err != nil {
+		t.Fatalf("json.Marshal(activity) error = %v", err)
+	}
+	if !strings.Contains(string(payload), "\"name\":\"Example Film\"") {
+		t.Fatalf("activity payload = %s, want media title in name field", payload)
 	}
 }

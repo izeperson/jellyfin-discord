@@ -17,6 +17,7 @@ type DiscordRPC struct {
 }
 
 type Activity struct {
+	Name       string     `json:"name,omitempty"`
 	Details    string     `json:"details,omitempty"`
 	State      string     `json:"state,omitempty"`
 	Assets     Assets     `json:"assets,omitempty"`
