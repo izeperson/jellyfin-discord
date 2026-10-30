@@ -1,12 +1,38 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestWaitForDiscordReady(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		payload := []byte(`{"evt":"READY"}`)
+		frame := make([]byte, 8+len(payload))
+		binary.LittleEndian.PutUint32(frame[:4], 1)
+		binary.LittleEndian.PutUint32(frame[4:8], uint32(len(payload)))
+		copy(frame[8:], payload)
+		_, err := server.Write(frame)
+		serverErr <- err
+	}()
+
+	if err := waitForDiscordReady(client); err != nil {
+		t.Fatalf("waitForDiscordReady() error = %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("mock Discord write error = %v", err)
+	}
+}
 
 func TestWriteConfigTemplateCreatesFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
@@ -80,6 +106,78 @@ func TestGetMediaDetailsUsesAlbumArtistForMusic(t *testing.T) {
 	}
 	if searchTitle != "Example Artist - Example Track" {
 		t.Fatalf("searchTitle = %q, want %q", searchTitle, "Example Artist - Example Track")
+	}
+}
+
+func TestGetMusicArtworkItemID(t *testing.T) {
+	tests := []struct {
+		name    string
+		track   string
+		album   string
+		albumID string
+		wantID  string
+	}{
+		{name: "album track uses album ID", track: "Example Track", album: "Example Album", albumID: "album-id", wantID: "album-id"},
+		{name: "single uses track ID", track: "Example Single", album: "Example Single", albumID: "single-release-id", wantID: "track-id"},
+		{name: "missing album ID uses track ID", track: "Example Track", album: "Example Album", wantID: "track-id"},
+		{name: "missing album uses track ID", track: "Example Single", wantID: "track-id"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var item JellyfinSession
+			item.NowPlayingItem.Name = test.track
+			item.NowPlayingItem.Album = test.album
+			item.NowPlayingItem.AlbumId = test.albumID
+			if got := getMusicArtworkItemID(item, "track-id"); got != test.wantID {
+				t.Errorf("getMusicArtworkItemID() = %q, want %q", got, test.wantID)
+			}
+		})
+	}
+}
+
+func TestApplyMusicActivityText(t *testing.T) {
+	var item JellyfinSession
+	item.NowPlayingItem.Name = "Example Track"
+	item.NowPlayingItem.Artists = []string{"Example Artist"}
+	item.NowPlayingItem.Album = "Example Album"
+
+	tests := []struct {
+		name          string
+		display       string
+		album         string
+		wantName      string
+		wantDetails   string
+		wantState     string
+		wantImageText string
+	}{
+		{name: "default mode", display: DefaultMusicDisplay, album: "Example Album", wantName: "Example Artist", wantDetails: "Example Track", wantState: "Example Artist", wantImageText: "Example Album"},
+		{name: "single-character album omits hover text", display: DefaultMusicDisplay, album: "U", wantName: "Example Artist", wantDetails: "Example Track", wantState: "Example Artist"},
+		{name: "artist and song", display: "artist_and_song", album: "Example Album", wantName: "Example Track", wantDetails: "Example Track", wantState: "Example Artist - Example Track", wantImageText: "Example Track"},
+		{name: "song only", display: "song_only", album: "Example Album", wantName: "Example Track", wantDetails: "Example Track", wantImageText: "Example Track"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			item.NowPlayingItem.Album = test.album
+			activity := Activity{
+				Name:   item.NowPlayingItem.Name,
+				Assets: Assets{LargeText: item.NowPlayingItem.Name},
+			}
+			applyMusicActivityText(&activity, item, test.display)
+			if activity.Name != test.wantName {
+				t.Errorf("name = %q, want %q", activity.Name, test.wantName)
+			}
+			if activity.Details != test.wantDetails {
+				t.Errorf("details = %q, want %q", activity.Details, test.wantDetails)
+			}
+			if activity.State != test.wantState {
+				t.Errorf("state = %q, want %q", activity.State, test.wantState)
+			}
+			if activity.Assets.LargeText != test.wantImageText {
+				t.Errorf("large text = %q, want %q", activity.Assets.LargeText, test.wantImageText)
+			}
+		})
 	}
 }
 

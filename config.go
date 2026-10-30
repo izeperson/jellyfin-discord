@@ -11,6 +11,7 @@ import (
 const (
 	DefaultPollInterval    = 3
 	DefaultGenericItemText = "on Jellyfin"
+	DefaultMusicDisplay    = "default"
 )
 
 var defaultAnimeTags = []string{"anime", "japanese animation", "animation", "manga"}
@@ -32,6 +33,7 @@ type Config struct {
 	EnableButtons     bool     `json:"enable_buttons"`
 	PublicJellyfinURL string   `json:"public_jellyfin_url"`
 	DisableMusic      bool     `json:"disable_music"`
+	MusicDisplay      string   `json:"music_display"`
 }
 
 func missingConfigFields(cfg Config) []string {
@@ -81,7 +83,8 @@ func writeConfigTemplate(path string) error {
   "anilist_enabled": true,
   "enable_buttons": false,
   "public_jellyfin_url": "",
-  "disable_music": false
+	"disable_music": false,
+	"music_display": "default"
 }
 `
 
@@ -115,6 +118,9 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.GenericItemText == "" {
 		cfg.GenericItemText = DefaultGenericItemText
+	}
+	if cfg.MusicDisplay != "artist_and_song" && cfg.MusicDisplay != "song_only" {
+		cfg.MusicDisplay = DefaultMusicDisplay
 	}
 	if len(cfg.AnimeTags) == 0 {
 		cfg.AnimeTags = append([]string(nil), defaultAnimeTags...)

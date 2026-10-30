@@ -1,3 +1,3 @@
-module jellyfin-rpc
+module jellyfin-discord
 
 go 1.21

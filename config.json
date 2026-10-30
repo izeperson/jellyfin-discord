@@ -13,5 +13,6 @@
   "anime_tags": ["anime", "japanese animation", "animation", "manga", "otaku"],
   "enable_buttons": false,
   "public_jellyfin_url": "https://jellyfin.example.com",
-  "disable_music": true
+  "disable_music": false,
+  "music_display": "default"
 }

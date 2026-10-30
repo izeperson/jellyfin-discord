@@ -12,12 +12,13 @@ Use `config.json` to configure the program. Copy it to a local file before addin
 </p>
 
 <h4>Configuration</h4>
-<p>The available values are: jellyfin_url, jellyfin_token, tmdb_api_key, omdb_api_key, discord_app_id, target_user, poll_interval, show_paused, episode_thumbnails, fallback_artwork, generic_item_text, anime_tags, anilist_enabled, enable_buttons, public_jellyfin_url, and disable_music.</p>
+<p>The available values are: jellyfin_url, jellyfin_token, tmdb_api_key, omdb_api_key, discord_app_id, target_user, poll_interval, show_paused, episode_thumbnails, fallback_artwork, generic_item_text, anime_tags, anilist_enabled, enable_buttons, public_jellyfin_url, disable_music, and music_display.</p>
 
 <ul>
   <li><b>episode_thumbnails</b> (bool): fetch episode-specific stills from TMDB instead of the series poster</li>
   <li><b>fallback_artwork</b> (bool): use Jellyfin's own artwork endpoint if TMDB has no poster</li>
   <li><b>public_jellyfin_url</b> (string): public URL used when Discord needs to load Jellyfin artwork or links</li>
+  <li><b>music_display</b> (string): choose <code>default</code> (track with artist), <code>artist_and_song</code> (artist and track together), or <code>song_only</code>. Defaults to <code>default</code>.</li>
 </ul>
 
 <h3>Build</h3>

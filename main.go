@@ -185,7 +185,11 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 					if cfg.PublicJellyfinURL != "" {
 						artworkBaseURL = cfg.PublicJellyfinURL
 					}
-					jellyfinURL := getJellyfinArtwork(artworkBaseURL, cfg.JellyfinToken, currentID)
+					artworkID := currentID
+					if isAudio {
+						artworkID = getMusicArtworkItemID(*targetItem, currentID)
+					}
+					jellyfinURL := getJellyfinArtwork(artworkBaseURL, cfg.JellyfinToken, artworkID)
 					if isValidImageURL(jellyfinURL) {
 						poster = jellyfinURL
 						logInfo("Search", fmt.Sprintf("Using Jellyfin artwork: %s", poster))
@@ -357,11 +361,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 					logInfo("Image Fetch", "External image providers failed, falling back to Jellyfin artwork.")
 					imageID := currentID
 					if isAudio {
-						if targetItem.NowPlayingItem.AlbumId != "" {
-							imageID = targetItem.NowPlayingItem.AlbumId
-						} else if targetItem.NowPlayingItem.ParentId != "" {
-							imageID = targetItem.NowPlayingItem.ParentId
-						}
+						imageID = getMusicArtworkItemID(*targetItem, currentID)
 					} else if targetItem.NowPlayingItem.Type == "Episode" && targetItem.NowPlayingItem.SeriesId != "" {
 						if !cfg.EpisodeThumbnails {
 							imageID = targetItem.NowPlayingItem.SeriesId
@@ -462,6 +462,9 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				}
 
 				activity.Details = lineOne
+				if isAudio {
+					applyMusicActivityText(&activity, *targetItem, cfg.MusicDisplay)
+				}
 				if *lastRatings != "" {
 					activity.State = statePrefix + " | " + *lastRatings
 				} else {
@@ -469,13 +472,23 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 				}
 				activity.Assets.SmallImage = "https://images.weserv.nl/?url=" + url.QueryEscape(PauseIconURL) + "&w=64&h=64&inv"
 				activity.Assets.SmallText = statePrefix
-				logInfo("Status", statePrefix+": "+lineOne)
+				logInfo("Activity", "Submitting "+statePrefix+": "+lineOne)
 			} else {
 				activity.Details = lineOne
-				if *lastRatings != "" {
-					activity.State = fmt.Sprintf("%s | %s", lineTwo, *lastRatings)
+				if isAudio {
+					applyMusicActivityText(&activity, *targetItem, cfg.MusicDisplay)
+					if *lastRatings != "" {
+						if activity.State != "" {
+							activity.State += " | "
+						}
+						activity.State += *lastRatings
+					}
 				} else {
-					activity.State = lineTwo
+					if *lastRatings != "" {
+						activity.State = fmt.Sprintf("%s | %s", lineTwo, *lastRatings)
+					} else {
+						activity.State = lineTwo
+					}
 				}
 				if startUnix > 0 && endUnix > 0 {
 					activity.Timestamps = Timestamps{
@@ -483,7 +496,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 						End:   endUnix,
 					}
 				}
-				logInfo("Status", fmt.Sprintf("Playing/Skipped: %s - %s", lineOne, lineTwo))
+				logInfo("Activity", fmt.Sprintf("Submitting: %s - %s", lineOne, lineTwo))
 			}
 
 			if err := drpc.SetActivity(&activity); err == nil {

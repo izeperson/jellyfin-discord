@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"runtime"
@@ -56,6 +57,87 @@ func (d *DiscordRPC) send(opcode int, payload interface{}) error {
 	return err
 }
 
+func waitForDiscordReady(conn net.Conn) error {
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	defer conn.SetReadDeadline(time.Time{})
+
+	for {
+		var header [8]byte
+		if _, err := io.ReadFull(conn, header[:]); err != nil {
+			return fmt.Errorf("waiting for Discord READY event: %w", err)
+		}
+		opcode := binary.LittleEndian.Uint32(header[:4])
+		length := binary.LittleEndian.Uint32(header[4:])
+		if length > 1<<20 {
+			return fmt.Errorf("Discord handshake response too large: %d bytes", length)
+		}
+		data := make([]byte, length)
+		if _, err := io.ReadFull(conn, data); err != nil {
+			return fmt.Errorf("reading Discord handshake response: %w", err)
+		}
+		if opcode != 1 {
+			continue
+		}
+
+		var response struct {
+			Event string `json:"evt"`
+			Data  struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(data, &response); err != nil {
+			return fmt.Errorf("decoding Discord handshake response: %w", err)
+		}
+		switch response.Event {
+		case "READY":
+			return nil
+		case "ERROR":
+			return fmt.Errorf("Discord handshake failed (%d): %s", response.Data.Code, response.Data.Message)
+		}
+	}
+}
+
+func (d *DiscordRPC) readEvents() {
+	for {
+		var header [8]byte
+		if _, err := io.ReadFull(d.conn, header[:]); err != nil {
+			return
+		}
+		opcode := binary.LittleEndian.Uint32(header[:4])
+		length := binary.LittleEndian.Uint32(header[4:])
+		if length > 1<<20 {
+			logWarn("Discord RPC", fmt.Sprintf("Ignoring oversized event frame: %d bytes", length))
+			return
+		}
+		data := make([]byte, length)
+		if _, err := io.ReadFull(d.conn, data); err != nil {
+			return
+		}
+		if opcode != 1 {
+			continue
+		}
+
+		var event struct {
+			Command string `json:"cmd"`
+			Event   string `json:"evt"`
+			Data    struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(data, &event); err != nil {
+			logWarn("Discord RPC", fmt.Sprintf("Could not decode RPC event: %v", err))
+			continue
+		}
+		if event.Event == "ERROR" {
+			logWarn("Discord RPC", fmt.Sprintf("Discord rejected %s (%d): %s", event.Command, event.Data.Code, event.Data.Message))
+		}
+	}
+}
+
 func (d *DiscordRPC) Connect() error {
 	dirs := getIPCPaths()
 	var conn net.Conn
@@ -79,6 +161,11 @@ func (d *DiscordRPC) Connect() error {
 					conn.Close()
 					continue
 				}
+				if err := waitForDiscordReady(conn); err != nil {
+					conn.Close()
+					continue
+				}
+				go d.readEvents()
 				logInfo("Connected to Discord via", path)
 				return nil
 			}

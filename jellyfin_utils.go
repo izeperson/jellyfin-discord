@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 func getJellyfinItem(ctx context.Context, jellyfinURL, token, userID, itemID string) (JellyfinItem, error) {
@@ -56,6 +57,21 @@ func getJellyfinArtwork(jellyfinURL, token, itemID string) string {
 	}
 	logInfo("Jellyfin Artwork", fmt.Sprintf("Returning direct Jellyfin artwork URL for item %s", itemID))
 	return fullUrl
+}
+
+func getMusicArtworkItemID(item JellyfinSession, currentID string) string {
+	track := strings.TrimSpace(item.NowPlayingItem.Name)
+	album := strings.TrimSpace(item.NowPlayingItem.Album)
+	if album == "" || strings.EqualFold(album, track) {
+		return currentID
+	}
+	if item.NowPlayingItem.AlbumId != "" {
+		return item.NowPlayingItem.AlbumId
+	}
+	if item.NowPlayingItem.ParentId != "" {
+		return item.NowPlayingItem.ParentId
+	}
+	return currentID
 }
 
 func isValidImageURL(imageURL string) bool {
@@ -117,6 +133,41 @@ func getMusicArtist(item JellyfinSession) string {
 		return item.NowPlayingItem.Artists[0]
 	}
 	return item.NowPlayingItem.AlbumArtist
+}
+
+func validDiscordAssetText(text string) bool {
+	length := utf8.RuneCountInString(text)
+	return length >= 2 && length <= 128
+}
+
+func applyMusicActivityText(activity *Activity, item JellyfinSession, display string) {
+	track := item.NowPlayingItem.Name
+	artist := getMusicArtist(item)
+	activity.Assets.LargeText = ""
+	switch display {
+	case "artist_and_song":
+		activity.Details = track
+		if validDiscordAssetText(track) {
+			activity.Assets.LargeText = track
+		}
+		if artist != "" {
+			activity.State = fmt.Sprintf("%s - %s", artist, track)
+		}
+	case "song_only":
+		activity.Details = track
+		if validDiscordAssetText(track) {
+			activity.Assets.LargeText = track
+		}
+	default:
+		activity.Details = track
+		if artist != "" {
+			activity.Name = artist
+		}
+		activity.State = artist
+		if validDiscordAssetText(item.NowPlayingItem.Album) {
+			activity.Assets.LargeText = item.NowPlayingItem.Album
+		}
+	}
 }
 
 func getMediaDetails(item JellyfinSession, genericText string) (lineOne, lineTwo, searchTitle, prodYear string, sNum, eNum float64) {
