@@ -15,6 +15,7 @@ Use `config.json` to configure the program. Copy it to a local file before addin
 <p>The available values are: jellyfin_url, jellyfin_token, tmdb_api_key, omdb_api_key, discord_app_id, target_user, poll_interval, show_paused, episode_thumbnails, fallback_artwork, generic_item_text, anime_tags, anilist_enabled, enable_buttons, public_jellyfin_url, disable_music, and music_display.</p>
 
 <ul>
+  <li><b>poll_interval</b> (seconds): request interval for Jellyfin WebSocket session updates. REST session polling is retained as a one-minute reconciliation fallback.</li>
   <li><b>episode_thumbnails</b> (bool): fetch episode-specific stills from TMDB instead of the series poster</li>
   <li><b>fallback_artwork</b> (bool): use Jellyfin's own artwork endpoint if TMDB has no poster</li>
   <li><b>public_jellyfin_url</b> (string): public URL used when Discord needs to load Jellyfin artwork or links</li>
@@ -30,7 +31,8 @@ make build-windows</code></pre>
 <h3>Features</h3>
 <ul>
   <li><b>Config validation</b>: On startup, required fields (jellyfin_url, jellyfin_token, discord_app_id, target_user) are validated. If any are missing, an error is logged and the program exits.</li>
-  <li><b>Auto-reconnect</b>: If Jellyfin becomes unreachable, the program logs a warning and retries on the next poll interval instead of crashing. Configuration reload will also reconnect to Discord if the App ID changes.</li>
+  <li><b>Playback updates</b>: Jellyfin WebSocket session updates trigger activity refreshes; a REST session request runs at startup and once per minute as a reconciliation fallback.</li>
+  <li><b>Auto-reconnect</b>: If Jellyfin becomes unreachable, the WebSocket reconnects automatically and REST reconciliation continues. Configuration reload also reconnects to Discord if the App ID changes.</li>
   <li><b>Music support</b>: Music tracks (type "Audio") are now supported. Discord will show the track name, artist, and album.</li>
   <li><b>Config reload</b>: Send a SIGHUP signal to reload config.json at runtime without restarting. Use: <code>kill -HUP &lt;pid&gt;</code></li>
 </ul>

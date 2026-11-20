@@ -74,6 +74,13 @@ func getMusicArtworkItemID(item JellyfinSession, currentID string) string {
 	return currentID
 }
 
+func getJellyfinArtworkItemID(item JellyfinSession, currentID string, episodeThumbnails bool) string {
+	if item.NowPlayingItem.Type == "Episode" && !episodeThumbnails && item.NowPlayingItem.SeriesId != "" {
+		return item.NowPlayingItem.SeriesId
+	}
+	return currentID
+}
+
 func isValidImageURL(imageURL string) bool {
 	if imageURL == "" {
 		return false
@@ -212,4 +219,52 @@ func getMediaDetails(item JellyfinSession, genericText string) (lineOne, lineTwo
 		searchTitle = item.NowPlayingItem.Name
 	}
 	return
+}
+
+func isBufferingState(isPaused bool, posTicks float64, currentID string, lastItemID string) bool {
+	if !isPaused || posTicks >= TicksPerSecond*5 {
+		return false
+	}
+	return currentID != "" && lastItemID == ""
+}
+
+func hasTargetPlaybackSession(sessions []JellyfinSession, cfg Config) bool {
+	for _, session := range sessions {
+		if session.UserName == cfg.TargetUser && session.NowPlayingItem.Id != "" {
+			if isMusicItem(session) && cfg.DisableMusic {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func selectTargetSession(sessions []JellyfinSession, cfg Config, lastItemID string) *JellyfinSession {
+	var firstPaused *JellyfinSession
+	var previousPaused *JellyfinSession
+
+	for i := range sessions {
+		item := &sessions[i]
+		if item.UserName != cfg.TargetUser || item.NowPlayingItem.Id == "" {
+			continue
+		}
+		if isMusicItem(*item) && cfg.DisableMusic {
+			continue
+		}
+		if !item.PlayState.IsPaused {
+			return item
+		}
+		if firstPaused == nil {
+			firstPaused = item
+		}
+		if lastItemID != "" && item.NowPlayingItem.Id == lastItemID {
+			previousPaused = item
+		}
+	}
+
+	if previousPaused != nil {
+		return previousPaused
+	}
+	return firstPaused
 }

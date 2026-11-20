@@ -9,12 +9,14 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"sync/atomic"
 	"time"
 )
 
 type DiscordRPC struct {
-	conn  net.Conn
-	appID string
+	conn   net.Conn
+	appID  string
+	closed atomic.Bool
 }
 
 type Activity struct {
@@ -45,6 +47,9 @@ type Timestamps struct {
 }
 
 func (d *DiscordRPC) send(opcode int, payload interface{}) error {
+	if d.closed.Load() {
+		return fmt.Errorf("Discord RPC connection is closed")
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -54,6 +59,10 @@ func (d *DiscordRPC) send(opcode int, payload interface{}) error {
 	binary.Write(buf, binary.LittleEndian, int32(len(data)))
 	buf.Write(data)
 	_, err = d.conn.Write(buf.Bytes())
+	if err != nil {
+		d.closed.Store(true)
+		d.Close()
+	}
 	return err
 }
 
@@ -101,6 +110,7 @@ func waitForDiscordReady(conn net.Conn) error {
 }
 
 func (d *DiscordRPC) readEvents() {
+	defer d.closed.Store(true)
 	for {
 		var header [8]byte
 		if _, err := io.ReadFull(d.conn, header[:]); err != nil {
@@ -191,6 +201,7 @@ func (d *DiscordRPC) ClearActivity() error {
 }
 
 func (d *DiscordRPC) Close() {
+	d.closed.Store(true)
 	if d.conn != nil {
 		d.conn.Close()
 	}

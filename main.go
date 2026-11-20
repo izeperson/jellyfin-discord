@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -16,18 +15,19 @@ import (
 )
 
 const (
-	ColorReset           = "\033[0m"
-	ColorGreen           = "\033[32m"
-	ColorYellow          = "\033[33m"
-	ColorRed             = "\033[31m"
-	PauseIconURL         = "https://raw.githubusercontent.com/google/material-design-icons/master/png/av/pause/materialicons/48dp/2x/baseline_pause_black_48dp.png"
-	PlaceholderImageURL  = ""
-	TicksPerSecond       = 10000000
-	SeekThresholdSeconds = 5
-	ClientName           = "Jellyfin-Discord-RPC"
-	ClientVersion        = "1.1.0"
-	DeviceName           = "Go-Backend"
-	CacheTTL             = 24 * time.Hour
+	ColorReset               = "\033[0m"
+	ColorGreen               = "\033[32m"
+	ColorYellow              = "\033[33m"
+	ColorRed                 = "\033[31m"
+	PauseIconURL             = "https://raw.githubusercontent.com/google/material-design-icons/master/png/av/pause/materialicons/48dp/2x/baseline_pause_black_48dp.png"
+	PlaceholderImageURL      = ""
+	TicksPerSecond           = 10000000
+	SeekThresholdSeconds     = 5
+	ClientName               = "Jellyfin-Discord-RPC"
+	ClientVersion            = "1.1.0"
+	DeviceName               = "Go-Backend"
+	CacheTTL                 = 24 * time.Hour
+	SessionsFallbackInterval = time.Minute
 )
 
 var httpClient = &http.Client{
@@ -107,22 +107,17 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 		return false
 	}
 
-	for _, item := range sessions {
-		if item.UserName == cfg.TargetUser {
-			if isMusicItem(item) && cfg.DisableMusic {
-				continue
-			}
-			targetItem = &item
-			isPaused = item.PlayState.IsPaused
-			posTicks = item.PlayState.PositionTicks
-			currentID = item.NowPlayingItem.Id
-			runTimeTicks = item.NowPlayingItem.RunTimeTicks
-			isAudio = isMusicItem(item)
-			lineOne, lineTwo, searchTitle, prodYear, sNum, eNum = getMediaDetails(item, cfg.GenericItemText)
-			break
-		}
+	targetItem = selectTargetSession(sessions, cfg, *lastItemID)
+	if targetItem != nil {
+		isPaused = targetItem.PlayState.IsPaused
+		posTicks = targetItem.PlayState.PositionTicks
+		currentID = targetItem.NowPlayingItem.Id
+		runTimeTicks = targetItem.NowPlayingItem.RunTimeTicks
+		isAudio = isMusicItem(*targetItem)
+		lineOne, lineTwo, searchTitle, prodYear, sNum, eNum = getMediaDetails(*targetItem, cfg.GenericItemText)
 	}
-	if targetItem != nil && (currentID != *lastItemID || *lastPoster == "") {
+
+	if targetItem != nil && currentID != *lastItemID {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		fullItem, err := getJellyfinItem(ctx, cfg.JellyfinURL, cfg.JellyfinToken, targetItem.UserId, currentID)
 		cancel()
@@ -136,7 +131,7 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 		}
 	}
 
-	isBuffering := isPaused && posTicks < TicksPerSecond*5
+	isBuffering := isBufferingState(isPaused, posTicks, currentID, *lastItemID)
 	now := time.Now()
 	elapsedTicks := float64(now.Sub(*lastUpdateTime).Seconds()) * TicksPerSecond
 	expectedPosTicks := *lastPosTicks
@@ -188,6 +183,8 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 					artworkID := currentID
 					if isAudio {
 						artworkID = getMusicArtworkItemID(*targetItem, currentID)
+					} else {
+						artworkID = getJellyfinArtworkItemID(*targetItem, currentID, cfg.EpisodeThumbnails)
 					}
 					jellyfinURL := getJellyfinArtwork(artworkBaseURL, cfg.JellyfinToken, artworkID)
 					if isValidImageURL(jellyfinURL) {
@@ -362,10 +359,8 @@ func updateActivity(drpc *DiscordRPC, cfg Config, sessions []JellyfinSession, la
 					imageID := currentID
 					if isAudio {
 						imageID = getMusicArtworkItemID(*targetItem, currentID)
-					} else if targetItem.NowPlayingItem.Type == "Episode" && targetItem.NowPlayingItem.SeriesId != "" {
-						if !cfg.EpisodeThumbnails {
-							imageID = targetItem.NowPlayingItem.SeriesId
-						}
+					} else {
+						imageID = getJellyfinArtworkItemID(*targetItem, currentID, cfg.EpisodeThumbnails)
 					}
 
 					jellyfinArtworkCache.RLock()
@@ -669,22 +664,60 @@ func main() {
 	var lastTMDBID int
 	var lastAniListURL string
 	lastUpdateTime := time.Now()
-	waitOrStop := func(duration time.Duration) bool {
-		timer := time.NewTimer(duration)
-		defer timer.Stop()
+	sessionUpdates := make(chan []JellyfinSession, 1)
+	streamCtx, stopSessionStream := context.WithCancel(context.Background())
+	startJellyfinSessionStream(streamCtx, cfg, sessionUpdates)
+	defer stopSessionStream()
+	fallbackTicker := time.NewTicker(SessionsFallbackInterval)
+	defer fallbackTicker.Stop()
+	rpcHealthTicker := time.NewTicker(15 * time.Second)
+	defer rpcHealthTicker.Stop()
+
+	missingSessionSnapshots := 0
+
+	refreshActivity := func(sessions []JellyfinSession) {
+		if drpc == nil || drpc.closed.Load() {
+			drpc, err = connectDiscord(cfg.DiscordAppID)
+			if err != nil {
+				return
+			}
+			logInfo("Late connection to Discord established", "")
+			lastItemID = ""
+			lastPosTicks = 0
+		}
+
+		if !hasTargetPlaybackSession(sessions, cfg) {
+			missingSessionSnapshots++
+			if missingSessionSnapshots < 2 {
+				return
+			}
+		} else {
+			missingSessionSnapshots = 0
+		}
+
+		if updateActivity(drpc, cfg, sessions, &lastItemID, &lastPlayState, &lastPosTicks, &lastUpdateTime, &lastPoster, &lastRatings, &lastTMDBID, &lastAniListURL, &lastBuffering) {
+			drpc = nil
+		}
+	}
+
+	fetchSessions := func() {
+		sessions, err := getJellyfinSessions(cfg)
+		if err != nil {
+			logWarn("Jellyfin sessions request failed", err.Error())
+			return
+		}
+		refreshActivity(sessions)
+	}
+
+	fetchSessions()
+
+	for {
 		select {
-		case <-timer.C:
-			return false
 		case <-termination:
 			if drpc != nil {
 				drpc.Close()
 			}
-			return true
-		}
-	}
-
-	for {
-		select {
+			return
 		case newCfg := <-reload:
 			if newCfg.DiscordAppID != cfg.DiscordAppID {
 				if drpc != nil {
@@ -699,6 +732,9 @@ func main() {
 				}
 			}
 			cfg = newCfg
+			stopSessionStream()
+			streamCtx, stopSessionStream = context.WithCancel(context.Background())
+			startJellyfinSessionStream(streamCtx, cfg, sessionUpdates)
 			lastItemID = ""
 			lastPlayState = false
 			lastPosTicks = 0
@@ -708,68 +744,23 @@ func main() {
 			lastTMDBID = 0
 			lastAniListURL = ""
 			logInfo("Config applied", "")
-		default:
-		}
-
-		if drpc == nil {
-			drpc, err = connectDiscord(cfg.DiscordAppID)
-			if err == nil {
-				logInfo("Late connection to Discord established", "")
+			fallbackTicker.Reset(SessionsFallbackInterval)
+			fetchSessions()
+		case sessions := <-sessionUpdates:
+			refreshActivity(sessions)
+		case <-fallbackTicker.C:
+			fetchSessions()
+		case <-rpcHealthTicker.C:
+			if drpc == nil || drpc.closed.Load() {
+				drpc, err = connectDiscord(cfg.DiscordAppID)
+				if err != nil {
+					continue
+				}
+				logInfo("Reconnected to Discord RPC", "")
 				lastItemID = ""
 				lastPosTicks = 0
+				fetchSessions()
 			}
-		}
-
-		req, err := http.NewRequest("GET", cfg.JellyfinURL+"/Sessions", nil)
-		if err != nil {
-			logError("Failed to create HTTP request for sessions", err.Error())
-			if waitOrStop(time.Duration(cfg.PollInterval) * time.Second) {
-				return
-			}
-			continue
-		}
-
-		authHeader := fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-			ClientName, DeviceName, cfg.DiscordAppID, ClientVersion, cfg.JellyfinToken)
-		req.Header.Set("Authorization", authHeader)
-		req.Header.Set("User-Agent", ClientName+"/"+ClientVersion)
-		req.Header.Set("Accept", "application/json")
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			logWarn("Jellyfin lost, retrying...", err.Error())
-			if waitOrStop(time.Duration(cfg.PollInterval) * time.Second) {
-				return
-			}
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			logWarn("Jellyfin sessions request failed with status", resp.Status)
-			if waitOrStop(time.Duration(cfg.PollInterval) * time.Second) {
-				return
-			}
-			continue
-		}
-
-		var sessions []JellyfinSession
-		decodeErr := json.NewDecoder(resp.Body).Decode(&sessions)
-		resp.Body.Close()
-
-		if decodeErr != nil {
-			logWarn("Failed to decode Jellyfin sessions response", decodeErr.Error())
-			if waitOrStop(time.Duration(cfg.PollInterval) * time.Second) {
-				return
-			}
-			continue
-		}
-
-		if updateActivity(drpc, cfg, sessions, &lastItemID, &lastPlayState, &lastPosTicks, &lastUpdateTime, &lastPoster, &lastRatings, &lastTMDBID, &lastAniListURL, &lastBuffering) {
-			drpc = nil
-		}
-		if waitOrStop(time.Duration(cfg.PollInterval) * time.Second) {
-			return
 		}
 	}
 }

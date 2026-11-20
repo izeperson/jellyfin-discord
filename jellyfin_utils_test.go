@@ -197,3 +197,81 @@ func TestDiscordActivityUsesMediaName(t *testing.T) {
 		t.Fatalf("activity payload = %s, want media title in name field", payload)
 	}
 }
+
+func TestGetJellyfinArtworkItemID(t *testing.T) {
+	var item JellyfinSession
+	item.NowPlayingItem.Type = "Episode"
+	item.NowPlayingItem.SeriesId = "series-id"
+
+	if got := getJellyfinArtworkItemID(item, "episode-id", false); got != "series-id" {
+		t.Errorf("getJellyfinArtworkItemID() = %q, want series-id", got)
+	}
+	if got := getJellyfinArtworkItemID(item, "episode-id", true); got != "episode-id" {
+		t.Errorf("getJellyfinArtworkItemID() with episode thumbnails = %q, want episode-id", got)
+	}
+}
+
+func TestIsBufferingState(t *testing.T) {
+	if !isBufferingState(true, TicksPerSecond*2, "new-item", "") {
+		t.Fatal("a newly started item below 5 seconds should be buffering")
+	}
+	if isBufferingState(true, TicksPerSecond*2, "new-item", "new-item") {
+		t.Fatal("pausing an already observed item should not be buffering")
+	}
+	if isBufferingState(true, TicksPerSecond*6, "new-item", "") {
+		t.Fatal("a position above 5 seconds should not be buffering")
+	}
+	if isBufferingState(false, TicksPerSecond*2, "new-item", "") {
+		t.Fatal("non-paused playback should not be buffering")
+	}
+	if isBufferingState(true, TicksPerSecond*2, "new-item", "old-item") {
+		t.Fatal("pausing a new item after an old item was observed should not be buffering")
+	}
+}
+
+func TestHasTargetPlaybackSession(t *testing.T) {
+	cfg := Config{TargetUser: "admin"}
+	if hasTargetPlaybackSession(nil, cfg) {
+		t.Fatal("empty sessions should not be active playback")
+	}
+
+	var session JellyfinSession
+	session.UserName = "admin"
+	session.NowPlayingItem.Id = "track-id"
+	session.NowPlayingItem.Type = "Audio"
+	if !hasTargetPlaybackSession([]JellyfinSession{session}, cfg) {
+		t.Fatal("target user's playing item should be active")
+	}
+
+	cfg.DisableMusic = true
+	if hasTargetPlaybackSession([]JellyfinSession{session}, cfg) {
+		t.Fatal("disabled music should not count as active playback")
+	}
+}
+
+func TestSelectTargetSessionPrefersActivePlayback(t *testing.T) {
+	cfg := Config{TargetUser: "admin"}
+
+	var music JellyfinSession
+	music.UserName = "admin"
+	music.NowPlayingItem.Id = "music-id"
+	music.NowPlayingItem.Type = "Audio"
+	music.NowPlayingItem.Name = "Song"
+	music.NowPlayingItem.Artists = []string{"Artist"}
+	music.PlayState.IsPaused = false
+
+	var episode JellyfinSession
+	episode.UserName = "admin"
+	episode.NowPlayingItem.Id = "episode-id"
+	episode.NowPlayingItem.Type = "Episode"
+	episode.NowPlayingItem.Name = "Episode"
+	episode.PlayState.IsPaused = true
+
+	got := selectTargetSession([]JellyfinSession{episode, music}, cfg, "episode-id")
+	if got == nil {
+		t.Fatal("selectTargetSession() returned nil")
+	}
+	if got.NowPlayingItem.Id != "music-id" {
+		t.Fatalf("selected item = %q, want music-id", got.NowPlayingItem.Id)
+	}
+}
